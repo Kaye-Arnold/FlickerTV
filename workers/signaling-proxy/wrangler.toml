@@ -1,0 +1,25 @@
+name = "flicker-signaling-proxy"
+type = "javascript"
+account_id = ""
+workers_dev = true
+route = ""
+zone_id = ""
+
+[build]
+command = "npm install && npm run build"
+cwd = "./"
+
+[build.upload]
+format = "service-worker"
+
+[env.production]
+routes = [
+  { pattern = "signaling.flicker.tv/*", zone_name = "flicker.tv" }
+]
+
+[env.development]
+vars = { DEBUG = "true" }
+
+[[migrations]]
+tag = "v1"
+new_sqlite_db = true

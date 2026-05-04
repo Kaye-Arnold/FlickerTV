@@ -1,0 +1,277 @@
+/* ============================================================================
+   Flicker.TV — Global Stylesheet
+   The MovieDom | Dark-first, cinematic design system
+   ============================================================================ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* --------------------------------------------------------------------------
+   Design tokens
+   -------------------------------------------------------------------------- */
+:root {
+  /* Palette */
+  --flicker-gold:         #c8a96e;
+  --flicker-gold-light:   #e8c98a;
+  --flicker-gold-dim:     rgba(200, 169, 110, 0.18);
+  --flicker-black:        #000000;
+  --flicker-dark:         #0a0a0f;
+  --flicker-dark-mid:     #111118;
+  --flicker-dark-surface: #17171f;
+  --flicker-dark-raised:  #1e1e28;
+
+  /* Typography */
+  --flicker-font-sans: system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --flicker-font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code',
+    Consolas, monospace;
+
+  /* Glass */
+  --flicker-glass-bg:     rgba(10, 10, 22, 0.60);
+  --flicker-glass-border: rgba(200, 169, 110, 0.15);
+  --flicker-blur:         blur(12px) saturate(1.4);
+
+  /* Motion */
+  --flicker-ease-cinematic: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --flicker-ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Spacing */
+  --flicker-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --flicker-safe-top:    env(safe-area-inset-top, 0px);
+}
+
+/* --------------------------------------------------------------------------
+   Reset & base
+   -------------------------------------------------------------------------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* Prevent pull-to-refresh interfering with vertical swipe feed */
+  overscroll-behavior-y: none;
+}
+
+body {
+  background-color: var(--flicker-dark);
+  color: #ffffff;
+  font-family: var(--flicker-font-sans);
+  line-height: 1.5;
+  /* Lock scrollbar during full-screen feed to prevent layout shift */
+  overflow: hidden;
+  /* Full-height on mobile including notch / nav bar */
+  height: 100dvh;
+  width: 100vw;
+  overscroll-behavior: none;
+  /* Improve text rendering on OLED screens */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#__next,
+main {
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------------------------
+   Cinematic scrollbar (desktop)
+   -------------------------------------------------------------------------- */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--flicker-dark);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--flicker-gold-dim);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--flicker-gold);
+}
+
+/* --------------------------------------------------------------------------
+   Focus visible — preserve accessibility, suppress mouse-click rings
+   -------------------------------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--flicker-gold);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* --------------------------------------------------------------------------
+   Selection
+   -------------------------------------------------------------------------- */
+::selection {
+  background: rgba(200, 169, 110, 0.3);
+  color: #fff;
+}
+
+/* --------------------------------------------------------------------------
+   Utility: prevent text selection on swipe targets
+   -------------------------------------------------------------------------- */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* --------------------------------------------------------------------------
+   Cinematic loading splash — shown while the feed hydrates
+   -------------------------------------------------------------------------- */
+.flicker-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: var(--flicker-dark);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  pointer-events: none;
+  transition: opacity 0.5s var(--flicker-ease-cinematic);
+}
+
+.flicker-splash--hidden {
+  opacity: 0;
+}
+
+.flicker-splash__wordmark {
+  font-size: 32px;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  color: #fff;
+}
+
+.flicker-splash__wordmark span {
+  color: var(--flicker-gold);
+}
+
+.flicker-splash__tagline {
+  font-size: 11px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.flicker-splash__reel {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.flicker-splash__frame {
+  width: 10px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--flicker-gold-dim);
+  animation: reelFlicker 1s ease-in-out infinite;
+}
+
+.flicker-splash__frame:nth-child(1) { animation-delay: 0.0s; }
+.flicker-splash__frame:nth-child(2) { animation-delay: 0.1s; }
+.flicker-splash__frame:nth-child(3) { animation-delay: 0.2s; }
+.flicker-splash__frame:nth-child(4) { animation-delay: 0.3s; }
+.flicker-splash__frame:nth-child(5) { animation-delay: 0.4s; }
+.flicker-splash__frame:nth-child(6) { animation-delay: 0.5s; }
+.flicker-splash__frame:nth-child(7) { animation-delay: 0.6s; }
+
+@keyframes reelFlicker {
+  0%, 100% { background: var(--flicker-gold-dim); transform: scaleY(0.7); }
+  50%       { background: var(--flicker-gold);     transform: scaleY(1);   }
+}
+
+/* --------------------------------------------------------------------------
+   Swiper overrides — prevent Swiper from injecting conflicting styles
+   -------------------------------------------------------------------------- */
+.swiper {
+  width: 100% !important;
+  height: 100dvh !important;
+}
+
+.swiper-slide {
+  height: 100dvh !important;
+  overflow: hidden !important;
+}
+
+/* --------------------------------------------------------------------------
+   PWA install prompt
+   -------------------------------------------------------------------------- */
+.flicker-install-prompt {
+  position: fixed;
+  bottom: calc(24px + var(--flicker-safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8000;
+  background: var(--flicker-glass-bg);
+  border: 1px solid var(--flicker-glass-border);
+  backdrop-filter: var(--flicker-blur);
+  -webkit-backdrop-filter: var(--flicker-blur);
+  border-radius: 16px;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: #fff;
+  font-size: 13px;
+  white-space: nowrap;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  animation: slideUpPrompt 0.4s var(--flicker-ease-spring) forwards;
+}
+
+@keyframes slideUpPrompt {
+  from { opacity: 0; transform: translateX(-50%) translateY(24px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0);    }
+}
+
+.flicker-install-prompt__icon {
+  font-size: 22px;
+}
+
+.flicker-install-prompt__text strong {
+  color: var(--flicker-gold);
+}
+
+.flicker-install-prompt__btn {
+  padding: 7px 16px;
+  border-radius: 100px;
+  background: linear-gradient(135deg, var(--flicker-gold), var(--flicker-gold-light));
+  color: var(--flicker-dark);
+  font-size: 12px;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: opacity 0.15s ease;
+}
+
+.flicker-install-prompt__btn:hover {
+  opacity: 0.88;
+}
+
+.flicker-install-prompt__dismiss {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  transition: color 0.15s ease;
+}
+
+.flicker-install-prompt__dismiss:hover {
+  color: rgba(255, 255, 255, 0.75);
+}

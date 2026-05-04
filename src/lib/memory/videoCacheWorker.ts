@@ -1,0 +1,1 @@
+// Worker placeholder for video cache

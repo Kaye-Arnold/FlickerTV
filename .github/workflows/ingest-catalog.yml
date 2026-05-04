@@ -1,0 +1,148 @@
+# Flicker.TV — Archive.org Catalog Ingestion Cron
+#
+# Schedule: every 12 hours at :00 UTC.
+# Purpose:  Fetch public domain film metadata from archive.org JSON APIs,
+#           apply the rule-based stream selector, and PATCH the compiled
+#           CinemaCard catalog JSON to a GitHub Gist.
+#
+# CRITICAL CONSTRAINT: This workflow does NOT commit back to the repository.
+# It is a pure execution pipeline: run script → push to external Gist → done.
+# The `permissions` block below enforces `contents: read` — write access to
+# the repository is structurally impossible from this workflow.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   GIST_PAT   GitHub PAT with `gist` read+write scope.
+#   GIST_ID    Alphanumeric ID of the target GitHub Gist.
+#
+# Optional repository variables (Settings → Variables → Actions):
+#   INGEST_LIMIT        Default: 200
+#   INGEST_CONCURRENCY  Default: 8
+
+name: Ingest Archive.org Catalog
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'   # Every 12 hours at :00 UTC
+
+  workflow_dispatch:
+    inputs:
+      ingest_limit:
+        description: 'Max items to process'
+        required: false
+        default: '200'
+        type: string
+      dry_run:
+        description: 'Print catalog to logs without pushing to Gist'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+# Prevent concurrent runs from creating a race condition on the Gist.
+concurrency:
+  group: ingest-catalog
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    name: Ingest & Publish Catalog
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    permissions:
+      # ENFORCEMENT: contents: read means this job structurally cannot commit
+      # back to the repository. The Gist push happens via GIST_PAT, which is
+      # an external credential scoped only to Gist write access.
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # Validate required secrets before spending time on a doomed run.
+      # This check runs BEFORE dependency installation to fail fast.
+      - name: Validate required secrets
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          HAS_GIST_PAT: ${{ secrets.GIST_PAT != '' }}
+          HAS_GIST_ID:  ${{ secrets.GIST_ID  != '' }}
+        run: |
+          FAILED=0
+          if [ "$HAS_GIST_PAT" != "true" ]; then
+            echo "::error title=Missing Secret::GIST_PAT is not configured."
+            echo "  → Settings → Secrets and variables → Actions → New repository secret"
+            FAILED=1
+          fi
+          if [ "$HAS_GIST_ID" != "true" ]; then
+            echo "::error title=Missing Secret::GIST_ID is not configured."
+            echo "  → Settings → Secrets and variables → Actions → New repository secret"
+            FAILED=1
+          fi
+          if [ "$FAILED" = "1" ]; then exit 1; fi
+          echo "✅ Secrets present."
+
+      - name: Install dependencies
+        run: |
+          npm install --save-dev \
+            ts-node@10 \
+            typescript@5 \
+            @types/node@20
+        # If a package-lock exists with these already in devDependencies,
+        # prefer `npm ci`. The explicit install above handles bootstrap cases.
+
+      - name: Type-check ingestion script
+        run: |
+          npx tsc \
+            --noEmit \
+            --target ES2020 \
+            --module CommonJS \
+            --moduleResolution node \
+            --esModuleInterop true \
+            --strict true \
+            --skipLibCheck true \
+            scripts/ingest.ts
+        # Type-check failure aborts the run before any network activity.
+
+      - name: Run ingestion pipeline
+        env:
+          GIST_PAT:            ${{ secrets.GIST_PAT }}
+          GIST_ID:             ${{ secrets.GIST_ID }}
+          INGEST_LIMIT:        ${{ github.event.inputs.ingest_limit || vars.INGEST_LIMIT || '200' }}
+          INGEST_CONCURRENCY:  ${{ vars.INGEST_CONCURRENCY || '8' }}
+          INGEST_DRY_RUN:      ${{ github.event.inputs.dry_run || 'false' }}
+          TS_NODE_COMPILER_OPTIONS: >-
+            {"module":"CommonJS","moduleResolution":"node",
+             "esModuleInterop":true,"strict":true,
+             "target":"ES2020","skipLibCheck":true}
+        run: |
+          npx ts-node \
+            --skip-project \
+            --compiler-options '{"module":"CommonJS","moduleResolution":"node","esModuleInterop":true,"strict":true,"target":"ES2020","skipLibCheck":true}' \
+            scripts/ingest.ts
+
+      - name: Write job summary
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          ICON="✅"
+          if [ "$STATUS" != "success" ]; then ICON="❌"; fi
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${ICON} Flicker.TV Catalog Ingestion
+          | Field | Value |
+          |---|---|
+          | Status | \`$STATUS\` |
+          | Triggered by | \`${{ github.event_name }}\` |
+          | Ingest limit | \`${{ github.event.inputs.ingest_limit || vars.INGEST_LIMIT || '200' }}\` |
+          | Dry run | \`${{ github.event.inputs.dry_run || 'false' }}\` |
+          | Gist PAT | \`${{ secrets.GIST_PAT != '' && 'configured' || '⚠ NOT SET' }}\` |
+          | Gist ID | \`${{ secrets.GIST_ID != '' && 'configured' || '⚠ NOT SET' }}\` |
+          | Completed | \`$(date -u '+%Y-%m-%d %H:%M:%S UTC')\` |
+          EOF

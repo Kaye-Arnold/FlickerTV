@@ -171,6 +171,12 @@ function docToFilmResult(doc: ArchiveSearchDoc): ArchiveFilmResult {
   };
 }
 
+function escapeLuceneTerm(input: string): string {
+  return input
+    .trim()
+    .replace(/[+\-&|!(){}\[\]^"~*?:\\/]/g, '\\$&')
+    .replace(/\s+/g, ' ');
+}
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -193,7 +199,7 @@ export async function searchArchiveOrg(
   } = options;
 
   const luceneQuery = [
-    `(${query.trim()})`,
+    `(${escapeLuceneTerm(query)})`,
     'mediatype:movies',
     'year:[1888 TO 1965]', // Focus on films most likely in public domain
     '-subject:(adult OR xxx OR porn)', // Content safety filter

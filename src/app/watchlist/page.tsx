@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useFeedStore } from '@/lib/store/feedStore';
 import type { CinemaCard } from '@/components/Feed/SwiperFeed';
@@ -13,7 +14,8 @@ const WatchlistCard: React.FC<{
   card: CinemaCard;
   index: number;
   onRemove: (tmdbId: string) => void;
-}> = ({ card, index, onRemove }) => (
+  onWatch: (card: CinemaCard) => void;
+}> = ({ card, index, onRemove, onWatch }) => (
   <motion.div
     className="wl-card"
     initial={{ opacity: 0, y: 20 }}
@@ -61,16 +63,13 @@ const WatchlistCard: React.FC<{
           <span key={g} className="wl-card__genre">{g}</span>
         ))}
       </div>
-      {card.archiveOrgUrl && (
-        
-          href={card.archiveOrgUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="wl-card__watch-btn"
-        >
-          ▶ Watch Free
-        </a>
-      )}
+      <button
+        type="button"
+        onClick={() => onWatch(card)}
+        className="wl-card__watch-btn"
+      >
+        Watch Free
+      </button>
     </div>
   </motion.div>
 );
@@ -99,11 +98,19 @@ const EmptyWatchlist: React.FC = () => (
 // ---------------------------------------------------------------------------
 
 export default function WatchlistPage() {
+  const router = useRouter();
   const { reel, bookmarkedIds, unbookmarkCard } = useFeedStore();
 
   const bookmarkedCards = useMemo<CinemaCard[]>(() => {
     return reel.filter((card) => bookmarkedIds.has(card.tmdbId));
   }, [reel, bookmarkedIds]);
+
+  const handleWatch = useCallback(
+    (card: CinemaCard) => {
+      router.push(`/watch/${encodeURIComponent(card.tmdbId)}`);
+    },
+    [router]
+  );
 
   return (
     <>
@@ -136,6 +143,7 @@ export default function WatchlistPage() {
                       card={card}
                       index={i}
                       onRemove={unbookmarkCard}
+                      onWatch={handleWatch}
                     />
                   ))}
                 </AnimatePresence>
@@ -333,6 +341,9 @@ const WATCHLIST_STYLES = `
     font-size: 11px;
     font-weight: 700;
     text-decoration: none;
+    border: none;
+    font-family: inherit;
+    cursor: pointer;
     letter-spacing: 0.03em;
     transition: opacity 0.15s ease;
     width: fit-content;

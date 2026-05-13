@@ -7,6 +7,7 @@ import React, {
   useState,
   useTransition,
 } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { searchArchiveOrg, type ArchiveFilmResult } from '@/lib/api/archiveOrg';
 import { useFeedStore } from '@/lib/store/feedStore';
@@ -61,7 +62,8 @@ const SearchResultCard: React.FC<{
   index:        number;
   isBookmarked: boolean;
   onBookmark:   (tmdbId: string) => void;
-}> = ({ card, index, isBookmarked, onBookmark }) => (
+  onWatch:      (card: CinemaCard) => void;
+}> = ({ card, index, isBookmarked, onBookmark, onWatch }) => (
   <motion.div
     className="search-result-card"
     initial={{ opacity: 0, y: 14 }}
@@ -115,16 +117,13 @@ const SearchResultCard: React.FC<{
       <p className="search-result-card__synopsis">{card.synopsis}</p>
 
       <div className="search-result-card__actions">
-        {card.archiveOrgUrl && (
-          
-            href={card.archiveOrgUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="search-result-card__watch-btn"
-          >
-            ▶ Watch Free
-          </a>
-        )}
+        <button
+          type="button"
+          onClick={() => onWatch(card)}
+          className="search-result-card__watch-btn"
+        >
+          Watch Free
+        </button>
         <span className="search-result-card__runtime">
           {Math.floor(card.runtimeMinutes / 60)}h {card.runtimeMinutes % 60}m
         </span>
@@ -172,6 +171,7 @@ const GENRE_FILTERS = [
 // ---------------------------------------------------------------------------
 
 export default function SearchPage() {
+  const router = useRouter();
   const [query,           setQuery          ] = useState('');
   const [committedQuery,  setCommittedQuery  ] = useState('');
   const [results,         setResults        ] = useState<CinemaCard[]>([]);
@@ -315,6 +315,14 @@ export default function SearchPage() {
   const handleBookmark = useCallback(
     (tmdbId: string) => { toggleBookmark(tmdbId); },
     [toggleBookmark]
+  );
+
+  const handleWatch = useCallback(
+    (card: CinemaCard) => {
+      appendToReel([card]);
+      router.push(`/watch/${encodeURIComponent(card.tmdbId)}`);
+    },
+    [appendToReel, router]
   );
 
   const showSkeleton = isLoading || isPending;
@@ -469,6 +477,7 @@ export default function SearchPage() {
                     index={i}
                     isBookmarked={bookmarkedIds.has(card.tmdbId)}
                     onBookmark={handleBookmark}
+                    onWatch={handleWatch}
                   />
                 ))}
               </motion.div>
@@ -754,6 +763,9 @@ const SEARCH_STYLES = `
     font-size: 11px;
     font-weight: 700;
     text-decoration: none;
+    border: none;
+    font-family: inherit;
+    cursor: pointer;
     letter-spacing: 0.02em;
     transition: opacity 0.15s ease;
     white-space: nowrap;

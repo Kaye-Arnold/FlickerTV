@@ -1,10 +1,6 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  output: 'export',
-  trailingSlash: true,
-  skipTrailingSlashRedirect: true,
-  distDir: 'out',
-  images: {
+const nextConfig = {  trailingSlash: true,
+  skipTrailingSlashRedirect: true,  images: {
     unoptimized: true,
     remotePatterns: [
       {
@@ -52,11 +48,11 @@ const nextConfig = {
           key: 'Content-Security-Policy',
           value: [
             "default-src 'self'",
-            "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+            "script-src 'self'",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob: https://image.tmdb.org https://archive.org https://*.archive.org https://upload.wikimedia.org",
             "media-src 'self' blob: https://archive.org https://*.archive.org",
-            "connect-src 'self' https://api.themoviedb.org https://archive.org https://*.archive.org",
+            "connect-src 'self' https://api.themoviedb.org https://archive.org https://*.archive.org https://gist.githubusercontent.com https://raw.githubusercontent.com",
             "worker-src 'self' blob:",
             "font-src 'self' data:",
           ].join('; '),

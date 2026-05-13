@@ -20,6 +20,21 @@
 
 export type StreamType = 'mp4' | 'hls';
 
+export interface FeedCinemaCard {
+  tmdbId: string;
+  movieTitle: string;
+  releaseYear: number;
+  directorName: string;
+  synopsis: string;
+  trailerUrl: string;
+  posterWebpUrl: string;
+  backdropUrl: string;
+  runtimeMinutes: number;
+  genres: string[];
+  archiveOrgUrl?: string;
+  rating?: number;
+}
+
 export interface CinemaCard {
   /** The canonical archive.org item identifier (e.g. "Nosferatu_1922"). */
   id: string;

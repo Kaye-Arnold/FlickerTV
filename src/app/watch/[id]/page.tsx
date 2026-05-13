@@ -10,7 +10,7 @@ import React, {
 import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import CinemaPlayer from '@/components/VideoPlayer/CinemaPlayer';
-import { useFeedStore } from '@/lib/store/feedStore';
+import { useFeedStore, useIsTurboMode } from '@/lib/store/feedStore';
 import { SEED_REEL } from '@/lib/data/seedReel';
 import {
   saveProgress,
@@ -150,7 +150,7 @@ const FilmMetaSidebar: React.FC<{ card: CinemaCard }> = ({ card }) => (
       <p className="watch-sidebar__synopsis">{card.synopsis}</p>
 
       {card.archiveOrgUrl && (
-        
+        <a
           href={card.archiveOrgUrl}
           target="_blank"
           rel="noopener noreferrer"
@@ -171,6 +171,7 @@ export default function WatchPage() {
   const params   = useParams<{ id: string }>();
   const router   = useRouter();
   const { reel } = useFeedStore();
+  const isTurboMode = useIsTurboMode();
 
   const [resolvedUrl, setResolvedUrl]   = useState<string | null>(null);
   const [isResolving, setIsResolving]   = useState(true);
@@ -183,6 +184,7 @@ export default function WatchPage() {
 
   const progressSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentSecondsRef    = useRef(0);
+  const durationSecondsRef   = useRef(0);
   const resolverAbortRef     = useRef<AbortController | null>(null);
 
   // ── Locate the card in the reel or seed data ─────────────────────────────
@@ -251,7 +253,7 @@ export default function WatchPage() {
 
     progressSaveTimerRef.current = setInterval(() => {
       if (currentSecondsRef.current > 0) {
-        saveProgress(card.tmdbId, currentSecondsRef.current, 0);
+        saveProgress(card.tmdbId, currentSecondsRef.current, durationSecondsRef.current);
       }
     }, 10_000);
 
@@ -265,9 +267,12 @@ export default function WatchPage() {
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleProgress = useCallback(
-    (_tmdbId: string, _percent: number) => {
-      // currentSecondsRef is updated by CinemaPlayer via a ref callback.
-      // This prop callback is used here for any side effects on progress updates.
+    (
+      _tmdbId: string,
+      progress: { currentSeconds: number; durationSeconds: number; percent: number }
+    ) => {
+      currentSecondsRef.current = progress.currentSeconds;
+      durationSecondsRef.current = progress.durationSeconds;
     },
     []
   );
@@ -358,11 +363,12 @@ export default function WatchPage() {
                     ? { ...card, trailerUrl: resolvedUrl }
                     : card
                 }
-                autoPlay={true}
-                initiallyMuted={false}
+                autoPlay={!isTurboMode}
+                initiallyMuted={isTurboMode}
+                startAtSeconds={resumeSeconds}
                 onProgress={handleProgress}
                 onEnded={(id) => {
-                  saveProgress(id, 0, 0); // Reset on completion
+                  saveProgress(id, 0, durationSecondsRef.current);
                 }}
               />
             )}

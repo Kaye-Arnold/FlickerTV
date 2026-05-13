@@ -4,6 +4,7 @@ import React, { useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { useCatalog } from '@/hooks/useCatalog';
 import { useFeedStore } from '@/lib/store/feedStore';
+import TabBar from '@/components/Navigation/TabBar';
 
 const SwiperFeed = dynamic(
   () => import('@/components/Feed/SwiperFeed').then((mod) => mod.SwiperFeed),
@@ -111,6 +112,8 @@ export default function Home() {
           <div>No films available. Please check your connection.</div>
         </div>
       )}
+
+      <TabBar />
     </main>
   );
 }

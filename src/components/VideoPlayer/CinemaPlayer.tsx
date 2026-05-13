@@ -33,9 +33,17 @@ export interface CinemaPlayerProps {
   card:            CinemaCard;
   autoPlay?:       boolean;
   initiallyMuted?: boolean;
+  startAtSeconds?: number;
   onEnded?:        (tmdbId: string) => void;
   onError?:        (tmdbId: string, err: string) => void;
-  onProgress?:     (tmdbId: string, percent: number) => void;
+  onProgress?:     (
+    tmdbId: string,
+    progress: {
+      currentSeconds: number;
+      durationSeconds: number;
+      percent: number;
+    }
+  ) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +254,7 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   card,
   autoPlay       = true,
   initiallyMuted = true,
+  startAtSeconds = 0,
   onEnded,
   onError,
   onProgress,
@@ -253,6 +262,7 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   const videoRef        = useRef<HTMLVideoElement>(null);
   const containerRef    = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSeekRef = useRef(startAtSeconds);
   // Tracks whether consumeChunk has fired for the current card to prevent
   // duplicate revocations if 'playing' fires more than once (e.g. after seek).
   const chunkConsumedRef = useRef(false);
@@ -322,7 +332,8 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   // chunk can be consumed correctly.
   useEffect(() => {
     chunkConsumedRef.current = false;
-  }, [card.tmdbId]);
+    pendingSeekRef.current = startAtSeconds;
+  }, [card.tmdbId, startAtSeconds]);
 
   // Sync video src when card changes.
   useEffect(() => {
@@ -357,15 +368,6 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
       .catch(() => setPlayerState((prev) => ({ ...prev, isPlaying: false })));
   }, [autoPlay, initiallyMuted]);
 
-  // Simulate mesh resolution after 3.5s.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent(`flicker:stream-ready:${card.tmdbId}`)
-      );
-    }, 3500);
-    return () => clearTimeout(timer);
-  }, [card.tmdbId]);
 
   // ── Video event handlers ─────────────────────────────────────────────────
 
@@ -388,12 +390,17 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
       bufferedPercent:    buffered,
     }));
 
-    onProgress?.(card.tmdbId, progressPercent);
+    onProgress?.(card.tmdbId, {
+      currentSeconds: video.currentTime,
+      durationSeconds: video.duration || 0,
+      percent: progressPercent,
+    });
   }, [card.tmdbId, onProgress]);
 
   const handleCanPlay = useCallback(() => {
     setPlayerState((prev) => ({ ...prev, isBuffering: false }));
-  }, []);
+    window.dispatchEvent(new CustomEvent(`flicker:stream-ready:${card.tmdbId}`));
+  }, [card.tmdbId]);
 
   const handleWaiting = useCallback(() => {
     setPlayerState((prev) => ({ ...prev, isBuffering: true }));
@@ -402,8 +409,13 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    if (pendingSeekRef.current > 0 && video.duration > pendingSeekRef.current) {
+      video.currentTime = pendingSeekRef.current;
+      pendingSeekRef.current = 0;
+    }
     setPlayerState((prev) => ({
       ...prev,
+      currentTimeSeconds: video.currentTime,
       durationSeconds: video.duration || 0,
     }));
   }, []);
@@ -562,7 +574,7 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
           className="cp-video"
           playsInline
           muted={initiallyMuted}
-          preload="metadata"
+          preload={autoPlay ? 'metadata' : 'none'}
           poster={card.backdropUrl}
           onTimeUpdate={handleTimeUpdate}
           onCanPlay={handleCanPlay}
@@ -611,7 +623,7 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
                     'Could not connect to this film node.'}
                 </p>
                 {card.archiveOrgUrl && (
-                  
+                  <a
                     href={card.archiveOrgUrl}
                     target="_blank"
                     rel="noopener noreferrer"

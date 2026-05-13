@@ -256,7 +256,7 @@ export async function fetchTmdbMovieDetails(
  * Enrich an archive.org film result with TMDB poster/backdrop/rating data.
  * Silently returns the original data if enrichment fails (TMDB is optional).
  */
-export async function enrichWithTmdb
+export async function enrichWithTmdb<
   T extends {
     movieTitle:     string;
     releaseYear:    number;
@@ -284,7 +284,7 @@ export async function enrichWithTmdb
       posterWebpUrl:  tmdbResult.posterUrl                       ?? film.posterWebpUrl,
       backdropUrl:    tmdbResult.backdropUrl                     ?? film.backdropUrl,
       rating:         tmdbResult.rating > 0 ? tmdbResult.rating  : film.rating,
-      runtimeMinutes: details?.runtime   > 0 ? details.runtime   : film.runtimeMinutes,
+      runtimeMinutes: details?.runtime && details.runtime > 0 ? details.runtime : film.runtimeMinutes,
       genres:         details?.genres.map((g) => g.name)         ?? film.genres,
       directorName:   details?.director                          ?? film.directorName,
     };

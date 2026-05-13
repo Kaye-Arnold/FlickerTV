@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { ToastProvider } from '@/components/UI/Toast';
 import OfflineBanner from '@/components/UI/OfflineBanner';
 import InstallPrompt from '@/components/PWA/InstallPrompt';
+import ClientBootstrap from '@/components/PWA/ClientBootstrap';
 import MemoryOverlay from '@/components/UI/MemoryOverlay';
 import './globals.css';
 
@@ -103,7 +104,6 @@ export default function RootLayout({
         <meta name="apple-mobile-web-app-capable"       content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="format-detection"                   content="telephone=no" />
-        <meta httpEquiv="Content-Security-Policy" content="worker-src 'self' blob:; script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:;" />
       </head>
       <body suppressHydrationWarning className="...">
             {/* Cinematic splash screen */}
@@ -125,34 +125,8 @@ export default function RootLayout({
           {children}
           <InstallPrompt />
           <MemoryOverlay />
+          <ClientBootstrap />
         </ToastProvider>
-
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              (function() {
-                if ('serviceWorker' in navigator) {
-                  window.addEventListener('load', function() {
-                    navigator.serviceWorker
-                      .register('/sw.js', { scope: '/' })
-                      .catch(function(err) {
-                        console.warn('[Flicker.TV] SW registration failed:', err);
-                      });
-                  });
-                }
-                window.addEventListener('DOMContentLoaded', function() {
-                  var splash = document.getElementById('flicker-splash');
-                  if (splash) {
-                    setTimeout(function() {
-                      splash.classList.add('flicker-splash--hidden');
-                      setTimeout(function() { splash.style.display = 'none'; }, 500);
-                    }, 600);
-                  }
-                });
-              })();
-            `,
-          }}
-        />
       </body>
     </html>
   );

@@ -180,6 +180,19 @@ const INITIAL_CHUNK_SEQUENCE_INDEX = 0;
 class VideoCacheManager {
   private static instance: VideoCacheManager | null = null;
   private worker: Worker | null = null;
+  private chunkMap = new WeakMap<HTMLVideoElement, ChunkRegistry>();
+  private activeRegistries = new Map<HTMLVideoElement, ChunkRegistry>();
+  private evictionTimer: ReturnType<typeof setInterval> | null = null;
+  private metrics: CacheMetrics = {
+    totalResidentBytes: 0,
+    totalRegistries: 0,
+    totalChunks: 0,
+    totalRevocations: 0,
+    totalEvictions: 0,
+    oomGuardActivations: 0,
+    totalMp4ChunksFetched: 0,
+    totalHlsSegmentsFetched: 0,
+  };
 
   private constructor() {
     try {
@@ -198,6 +211,8 @@ class VideoCacheManager {
       console.warn('[VideoCacheManager] Worker initialization failed:', err);
       this.worker = null;
     }
+
+    this.startEvictionSweeper();
   }
 
   static getInstance(): VideoCacheManager {
@@ -677,7 +692,7 @@ export function getVideoCacheManager(): VideoCacheManager {
   }
 
   if (_instance === null) {
-    _instance = new VideoCacheManager();
+    _instance = VideoCacheManager.getInstance();
     window.addEventListener('beforeunload', () => {
       _instance?.destroy();
     });
@@ -686,5 +701,4 @@ export function getVideoCacheManager(): VideoCacheManager {
   return _instance;
 }
 
-export type { CacheMetrics, StreamSource };
 export { VideoCacheManager, INITIAL_CHUNK_SEQUENCE_INDEX };

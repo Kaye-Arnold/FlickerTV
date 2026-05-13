@@ -32,6 +32,7 @@ import {
   type CatalogFetchResult,
 } from '@/lib/api/catalogClient';
 import { useFeedStore } from '@/lib/store/feedStore';
+import { SEED_REEL } from '@/lib/data/seedReel';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -167,7 +168,7 @@ export function useCatalog(): UseCatalogReturn {
         setIsLoading(false);
       }
     },
-    [setReel, setIsLoadingNextPage]
+    [setReel]
   );
 
   // ---------------------------------------------------------------------------

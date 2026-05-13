@@ -183,8 +183,8 @@ async function probeCandidate(
       });
 
       const latencyMs = Math.round(performance.now() - start);
-      // Promise resolved without throwing — node is reachable.
-      return { success: true, latencyMs };
+      // Opaque no-cors responses cannot prove the URL is playable.
+      return { success: false, latencyMs };
     }
   } catch {
     return { success: false, latencyMs: Math.round(performance.now() - start) };

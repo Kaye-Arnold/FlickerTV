@@ -243,7 +243,7 @@ export async function recordView(
   }, undefined);
 }
 
-export async function getRecentlyViewed(): Promise
+export async function getRecentlyViewed(): Promise<
   Array<{ tmdbId: string; movieTitle: string; viewedAt: number }>
 > {
   return safeRun(async (db) => {

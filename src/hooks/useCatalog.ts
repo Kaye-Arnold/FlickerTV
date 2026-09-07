@@ -97,9 +97,11 @@ export function useCatalog(): UseCatalogReturn {
 
   const currentPageRef   = useRef(1);
   const hasMoreRef       = useRef(true);
-  const isPaginatingRef  = useRef(false);
+  const isPaginatingRef = useRef(false);
   const isInitializedRef = useRef(false);
-  const abortRef         = useRef<AbortController | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const requestGenerationRef = useRef(0);
+  const paginationGenerationRef = useRef(0);
 
   // ---------------------------------------------------------------------------
   // Initial catalog load
@@ -108,17 +110,16 @@ export function useCatalog(): UseCatalogReturn {
   const loadInitial = useCallback(
     async (forceRefresh: boolean = false) => {
       if (isInitializedRef.current && !forceRefresh) return;
-      isInitializedRef.current = true;
 
-      // Cancel any in-flight request.
+      const generation = ++requestGenerationRef.current;
+      paginationGenerationRef.current += 1;
+      isPaginatingRef.current = false;
+      setIsPaginating(false);
+      setIsLoadingNextPage(false);
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
-
-      // ── TIMEOUT GUARD ────────────────────────────────────────────────────
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-      }, FETCH_TIMEOUT_MS);
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
       setIsLoading(true);
       setError(null);
@@ -132,15 +133,14 @@ export function useCatalog(): UseCatalogReturn {
           signal: controller.signal,
         });
 
-        if (controller.signal.aborted) {
-          throw new Error('Catalog fetch timeout or aborted');
+        if (
+          controller.signal.aborted ||
+          generation !== requestGenerationRef.current
+        ) {
+          return;
         }
 
-        clearTimeout(timeoutId);
-
-        // Inject first page into the feed store.
         setReel(result.cards);
-
         const cacheInfo = getCatalogCacheInfo();
 
         setCatalogMeta({
@@ -154,21 +154,38 @@ export function useCatalog(): UseCatalogReturn {
 
         hasMoreRef.current = result.cards.length < result.totalItems;
         currentPageRef.current = 1;
-      } catch (err) {
-        clearTimeout(timeoutId);
-        const msg =
-          (err as Error).name === 'AbortError'
+        isInitializedRef.current = true;
+      } catch (error: unknown) {
+        if (
+          controller.signal.aborted ||
+          generation !== requestGenerationRef.current
+        ) {
+          return;
+        }
+
+        const errorName =
+          error instanceof DOMException || error instanceof Error
+            ? error.name
+            : '';
+        const message =
+          errorName === 'AbortError'
             ? 'Catalog fetch timed out after 15s'
-            : `Failed to load catalog: ${(err as Error).message}`;
-        console.error('[useCatalog] loadInitial failed:', msg);
-        setError(msg);
-        // ── Fallback: inject seed reel so UI is not blocked ────────────────
+            : `Failed to load catalog: ${
+                error instanceof Error ? error.message : 'unknown error'
+              }`;
+        console.error('[useCatalog] loadInitial failed:', error);
+        setError(message);
         setReel(SEED_REEL);
+        isInitializedRef.current = true;
       } finally {
-        setIsLoading(false);
+        clearTimeout(timeoutId);
+        if (generation === requestGenerationRef.current) {
+          setIsLoading(false);
+          if (abortRef.current === controller) abortRef.current = null;
+        }
       }
     },
-    [setReel]
+    [setIsLoadingNextPage, setReel]
   );
 
   // ---------------------------------------------------------------------------
@@ -179,32 +196,47 @@ export function useCatalog(): UseCatalogReturn {
     if (isPaginatingRef.current || !hasMoreRef.current) return;
     if (!isInitializedRef.current) return;
 
+    const generation = requestGenerationRef.current;
+    const paginationGeneration = ++paginationGenerationRef.current;
     isPaginatingRef.current = true;
     setIsPaginating(true);
     setIsLoadingNextPage(true);
 
     try {
       const nextPage = currentPageRef.current + 1;
-
       const { cards, hasMore, totalItems } = await fetchCatalogPage(
         nextPage,
         SUBSEQUENT_PAGE_SIZE
       );
 
-      appendToReel(cards);
-      currentPageRef.current  = nextPage;
-      hasMoreRef.current      = hasMore;
+      if (
+        generation !== requestGenerationRef.current ||
+        paginationGeneration !== paginationGenerationRef.current
+      ) {
+        return;
+      }
 
-      setCatalogMeta((prev) => ({
-        ...prev,
-        totalItems,
-      }));
-    } catch (err) {
-      console.error('[useCatalog] Pagination failed:', err);
+      appendToReel(cards);
+      currentPageRef.current = nextPage;
+      hasMoreRef.current = hasMore;
+      setCatalogMeta((prev) => ({ ...prev, totalItems }));
+    } catch (error: unknown) {
+      if (
+        generation !== requestGenerationRef.current ||
+        paginationGeneration !== paginationGenerationRef.current
+      ) {
+        return;
+      }
+      console.error('[useCatalog] Pagination failed:', error);
     } finally {
-      isPaginatingRef.current = false;
-      setIsPaginating(false);
-      setIsLoadingNextPage(false);
+      if (
+        generation === requestGenerationRef.current &&
+        paginationGeneration === paginationGenerationRef.current
+      ) {
+        isPaginatingRef.current = false;
+        setIsPaginating(false);
+        setIsLoadingNextPage(false);
+      }
     }
   }, [appendToReel, setIsLoadingNextPage]);
 
@@ -225,7 +257,11 @@ export function useCatalog(): UseCatalogReturn {
     loadInitial();
 
     return () => {
+      requestGenerationRef.current += 1;
+      paginationGenerationRef.current += 1;
       abortRef.current?.abort();
+      abortRef.current = null;
+      isPaginatingRef.current = false;
     };
   }, [loadInitial]);
 

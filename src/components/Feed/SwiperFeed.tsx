@@ -3,9 +3,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Swiper, SwiperSlide } from 'swiper/react';
+import { Keyboard } from 'swiper/modules';
 import type SwiperClass from 'swiper';
 import BookmarkButton from '@/components/Feed/BookmarkButton';
 import { useFeedStore, useIsTurboMode } from '@/lib/store/feedStore';
+import { useIntersectionAutoplay } from '@/hooks/useIntersectionAutoplay';
 import type { FeedCinemaCard } from '@/types/schema';
 
 export type CinemaCard = FeedCinemaCard;
@@ -13,14 +15,69 @@ export type CinemaCard = FeedCinemaCard;
 export interface SwiperFeedProps {
   cinemaReel: CinemaCard[];
   onReachEnd: () => Promise<void>;
+  /** Derived network mode from the route; the store preference remains a fallback. */
+  turboMode?: boolean;
 }
+
+function isHlsSource(card: CinemaCard): boolean {
+  if (card.streamType === 'hls') return true;
+  const sourceWithoutQuery = card.trailerUrl.split(/[?#]/, 1)[0] ?? card.trailerUrl;
+  return sourceWithoutQuery.toLowerCase().endsWith('.m3u8');
+}
+
+const FeedPreviewVideo: React.FC<{
+  card: CinemaCard;
+  index: number;
+}> = ({ card, index }) => {
+  const hlsSource = isHlsSource(card);
+  const [nativeHlsSupported, setNativeHlsSupported] = useState(!hlsSource);
+  const videoRef = useIntersectionAutoplay({
+    enabled: nativeHlsSupported,
+    visibilityThreshold: 0.6,
+    muteOnAutoplay: true,
+  });
+
+  useEffect(() => {
+    if (!hlsSource) return;
+
+    const probe = document.createElement('video');
+    setNativeHlsSupported(
+      probe.canPlayType('application/vnd.apple.mpegurl') !== ''
+    );
+  }, [hlsSource]);
+
+  if (hlsSource && !nativeHlsSupported) return null;
+
+  return (
+    <video
+      ref={videoRef}
+      src={card.trailerUrl}
+      muted
+      playsInline
+      loop
+      preload={index === 0 ? 'metadata' : 'none'}
+      aria-hidden="true"
+      style={{
+        width: '100%',
+        height: '100%',
+        objectFit: 'cover',
+        position: 'absolute',
+        inset: 0,
+        opacity: 0.18,
+        pointerEvents: 'none',
+      }}
+    />
+  );
+};
 
 export const SwiperFeed: React.FC<SwiperFeedProps> = ({
   cinemaReel,
   onReachEnd,
+  turboMode,
 }) => {
   const { setCurrentIndex } = useFeedStore();
-  const isTurboMode = useIsTurboMode();
+  const storeTurboMode = useIsTurboMode();
+  const isTurboMode = turboMode ?? storeTurboMode;
   const router = useRouter();
   const [isInitialized, setIsInitialized] = useState(false);
 
@@ -37,9 +94,9 @@ export const SwiperFeed: React.FC<SwiperFeedProps> = ({
       setCurrentIndex(newIndex);
 
       if (newIndex >= cinemaReel.length - 3) {
-        onReachEnd().catch((err) =>
-          console.error('[SwiperFeed] Pagination error:', err)
-        );
+        void onReachEnd().catch((error: unknown) => {
+          console.error('[SwiperFeed] Pagination error:', error);
+        });
       }
     },
     [cinemaReel.length, setCurrentIndex, onReachEnd]
@@ -69,10 +126,14 @@ export const SwiperFeed: React.FC<SwiperFeedProps> = ({
   }
 
   return (
-    <Swiper      direction="vertical"
+    <Swiper
+      direction="vertical"
       loop={false}
+      modules={[Keyboard]}
+      keyboard={{ enabled: true, onlyInViewport: true }}
       virtual={{ slides: cinemaReel }}
       onSlideChange={handleSlideChange}
+      aria-label="Film discovery feed"
       className="swiper-feed"
       style={{ width: '100%', height: '100dvh' }}
     >
@@ -103,24 +164,7 @@ export const SwiperFeed: React.FC<SwiperFeedProps> = ({
               }}
             />
 
-            {!isTurboMode && (
-              <video
-                src={card.trailerUrl}
-                muted
-                playsInline
-                loop
-                preload={idx === 0 ? 'metadata' : 'none'}
-                aria-hidden="true"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  position: 'absolute',
-                  inset: 0,
-                  opacity: 0.18,
-                }}
-              />
-            )}
+            {!isTurboMode && <FeedPreviewVideo card={card} index={idx} />}
 
             <div
               style={{

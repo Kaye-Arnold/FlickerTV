@@ -58,7 +58,9 @@ export interface ChunkRequest {
   /** MP4 only: byte range start. HLS: ignored (segment URL is used). */
   byteRangeStart?: number;
   /** MP4 only: byte range end (inclusive). HLS: ignored. */
-  byteRangeEnd?:   number;
+  byteRangeEnd?: number;
+  /** Cancels a pending manifest, segment, or range request. */
+  signal?: AbortSignal;
 }
 
 export interface CacheMetrics {
@@ -99,8 +101,8 @@ interface HlsManifest {
  *   - Live streams — archive.org serves only VOD content.
  */
 function parseHlsManifest(manifestText: string, manifestUrl: string): HlsManifest {
-  const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
-  const lines   = manifestText.split(/\r?\n/).map((l) => l.trim());
+  const baseUrl = new URL('.', manifestUrl).toString();
+  const lines = manifestText.split(/\r?\n/).map((line) => line.trim());
   const segmentUrls: string[] = [];
   let   isMasterPlaylist = false;
 
@@ -118,7 +120,7 @@ function parseHlsManifest(manifestText: string, manifestUrl: string): HlsManifes
     // In a master playlist, the next non-comment line after EXT-X-STREAM-INF
     // is the variant playlist URL — treat the first variant as the selected one.
     if (isMasterPlaylist && !line.startsWith('#')) {
-      const variantUrl = line.startsWith('http') ? line : baseUrl + line;
+      const variantUrl = new URL(line, manifestUrl).toString();
       // Signal to the caller that this is a master playlist variant.
       // We return a single "segment" URL that is actually the variant playlist.
       return {
@@ -132,7 +134,7 @@ function parseHlsManifest(manifestText: string, manifestUrl: string): HlsManifes
 
     // Non-comment, non-empty line in a media playlist = segment URI.
     if (!isMasterPlaylist) {
-      const resolved = line.startsWith('http') ? line : baseUrl + line;
+      const resolved = new URL(line, manifestUrl).toString();
       segmentUrls.push(resolved);
     }
   }
@@ -173,13 +175,45 @@ const EVICTION_INTERVAL_MS = 60 * 1000;
 
 const INITIAL_CHUNK_SEQUENCE_INDEX = 0;
 
+interface RequestSignal {
+  signal: AbortSignal;
+  dispose: () => void;
+}
+
+function createRequestSignal(
+  timeoutMs: number,
+  parentSignal?: AbortSignal
+): RequestSignal {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)),
+    timeoutMs
+  );
+
+  const abortFromParent = () => {
+    controller.abort(parentSignal?.reason);
+  };
+
+  if (parentSignal) {
+    if (parentSignal.aborted) abortFromParent();
+    else parentSignal.addEventListener('abort', abortFromParent, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timeoutId);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // VideoCacheManager
 // ---------------------------------------------------------------------------
 
 class VideoCacheManager {
   private static instance: VideoCacheManager | null = null;
-  private worker: Worker | null = null;
   private chunkMap = new WeakMap<HTMLVideoElement, ChunkRegistry>();
   private activeRegistries = new Map<HTMLVideoElement, ChunkRegistry>();
   private evictionTimer: ReturnType<typeof setInterval> | null = null;
@@ -195,23 +229,6 @@ class VideoCacheManager {
   };
 
   private constructor() {
-    try {
-      // ── Worker initialization with fallback ─────────────────────────────
-      if (typeof Worker !== 'undefined') {
-        this.worker = new Worker(
-          new URL('./videoCacheWorker.ts', import.meta.url),
-          { type: 'module' }
-        );
-        this.worker.onerror = (event) => {
-          console.error('[VideoCacheManager] Worker error:', event.message);
-          this.worker = null;
-        };
-      }
-    } catch (err) {
-      console.warn('[VideoCacheManager] Worker initialization failed:', err);
-      this.worker = null;
-    }
-
     this.startEvictionSweeper();
   }
 
@@ -288,7 +305,12 @@ class VideoCacheManager {
         buffer = await this.fetchMp4Chunk(source.streamUrl, request, chunkSize);
         this.metrics.totalMp4ChunksFetched += 1;
       } else {
-        buffer = await this.fetchHlsSegment(source, sequenceIndex, registry);
+        buffer = await this.fetchHlsSegment(
+          source,
+          sequenceIndex,
+          registry,
+          request.signal
+        );
         this.metrics.totalHlsSegmentsFetched += 1;
       }
     } catch (err) {
@@ -307,32 +329,36 @@ class VideoCacheManager {
   // ---------------------------------------------------------------------------
 
   private async fetchMp4Chunk(
-    url:       string,
-    request:   ChunkRequest,
+    url: string,
+    request: ChunkRequest,
     chunkSize: number
   ): Promise<ArrayBuffer> {
     const start = request.byteRangeStart ?? 0;
-    const end   = request.byteRangeEnd   ?? start + chunkSize - 1;
+    const end = request.byteRangeEnd ?? start + chunkSize - 1;
+    const requestSignal = createRequestSignal(30_000, request.signal);
 
-    const response = await fetch(url, {
-      headers: {
-        // Range header instructs the server to return a partial response (HTTP 206).
-        // This is the standard mechanism for MP4 progressive download chunking.
-        'Range': `bytes=${start}-${end}`,
-      },
-      signal: AbortSignal.timeout(30_000),
-    });
+    try {
+      const response = await fetch(url, {
+        headers: {
+          // Range header instructs the server to return a partial response (HTTP 206).
+          // This is the standard mechanism for MP4 progressive download chunking.
+          Range: `bytes=${start}-${end}`,
+        },
+        signal: requestSignal.signal,
+      });
 
-    // HTTP 206 Partial Content = success for range request.
-    // HTTP 200 = server ignored the Range header and returned the full file.
-    //            We still accept it and use the full response.
-    if (!response.ok && response.status !== 206) {
-      throw new Error(
-        `[VideoCacheManager] MP4 range fetch failed: HTTP ${response.status} for ${url}`
-      );
+      // HTTP 206 Partial Content = success for range request.
+      // HTTP 200 = server ignored the Range header and returned the full response.
+      if (!response.ok && response.status !== 206) {
+        throw new Error(
+          `[VideoCacheManager] MP4 range fetch failed: HTTP ${response.status} for ${url}`
+        );
+      }
+
+      return await response.arrayBuffer();
+    } finally {
+      requestSignal.dispose();
     }
-
-    return response.arrayBuffer();
   }
 
   // ---------------------------------------------------------------------------
@@ -349,15 +375,17 @@ class VideoCacheManager {
    * is performed to resolve the first variant's media playlist.
    */
   private async fetchHlsSegment(
-    source:        StreamSource,
+    source: StreamSource,
     sequenceIndex: number,
-    registry:      ChunkRegistry
+    registry: ChunkRegistry,
+    parentSignal?: AbortSignal
   ): Promise<ArrayBuffer> {
     // Resolve segment list on first access.
     if (registry.hlsSegmentUrls === null) {
       registry.hlsSegmentUrls = await this.resolveHlsSegmentList(
         source.streamUrl,
-        registry
+        registry,
+        parentSignal
       );
     }
 
@@ -377,20 +405,25 @@ class VideoCacheManager {
     }
 
     const segmentUrl = segmentUrls[sequenceIndex]!;
+    const requestSignal = createRequestSignal(30_000, parentSignal);
 
-    const response = await fetch(segmentUrl, {
-      // HLS .ts segments are fetched without Range headers — each segment is
-      // a complete MPEG-TS container. The full segment is one chunk unit.
-      signal: AbortSignal.timeout(30_000),
-    });
+    try {
+      const response = await fetch(segmentUrl, {
+        // HLS .ts segments are fetched without Range headers — each segment is
+        // a complete MPEG-TS container. The full segment is one chunk unit.
+        signal: requestSignal.signal,
+      });
 
-    if (!response.ok) {
-      throw new Error(
-        `[VideoCacheManager] HLS segment fetch failed: HTTP ${response.status} for ${segmentUrl}`
-      );
+      if (!response.ok) {
+        throw new Error(
+          `[VideoCacheManager] HLS segment fetch failed: HTTP ${response.status} for ${segmentUrl}`
+        );
+      }
+
+      return await response.arrayBuffer();
+    } finally {
+      requestSignal.dispose();
     }
-
-    return response.arrayBuffer();
   }
 
   /**
@@ -404,13 +437,20 @@ class VideoCacheManager {
    */
   private async resolveHlsSegmentList(
     manifestUrl: string,
-    registry:    ChunkRegistry
+    registry: ChunkRegistry,
+    parentSignal?: AbortSignal
   ): Promise<string[]> {
     registry.hlsManifestUrl = manifestUrl;
+    const manifestRequest = createRequestSignal(15_000, parentSignal);
 
-    const manifestResponse = await fetch(manifestUrl, {
-      signal: AbortSignal.timeout(15_000),
-    });
+    let manifestResponse: Response;
+    try {
+      manifestResponse = await fetch(manifestUrl, {
+        signal: manifestRequest.signal,
+      });
+    } finally {
+      manifestRequest.dispose();
+    }
 
     if (!manifestResponse.ok) {
       throw new Error(
@@ -429,10 +469,17 @@ class VideoCacheManager {
       (parsed.segmentUrls[0].endsWith('.m3u8') ||
        parsed.segmentUrls[0].includes('.m3u8?'))
     ) {
-      const variantUrl      = parsed.segmentUrls[0];
-      const variantResponse = await fetch(variantUrl, {
-        signal: AbortSignal.timeout(15_000),
-      });
+      const variantUrl = parsed.segmentUrls[0];
+      const variantRequest = createRequestSignal(15_000, parentSignal);
+
+      let variantResponse: Response;
+      try {
+        variantResponse = await fetch(variantUrl, {
+          signal: variantRequest.signal,
+        });
+      } finally {
+        variantRequest.dispose();
+      }
 
       if (!variantResponse.ok) {
         throw new Error(
@@ -461,6 +508,21 @@ class VideoCacheManager {
   ): string | null {
     const registry = this.chunkMap.get(videoEl);
     if (!registry) return null;
+
+    // Replacing a sequence index must release the old blob before accounting
+    // for the new one. Concurrent retries otherwise leak both the byte count
+    // and the ObjectURL until the whole video element is destroyed.
+    const previousChunk = registry.chunks.get(sequenceIndex);
+    if (previousChunk) {
+      if (previousChunk.objectUrl !== null) {
+        URL.revokeObjectURL(previousChunk.objectUrl);
+        this.metrics.totalRevocations += 1;
+      }
+      registry.chunks.delete(sequenceIndex);
+      registry.totalBytes -= previousChunk.byteLength;
+      this.metrics.totalResidentBytes -= previousChunk.byteLength;
+      this.metrics.totalChunks -= 1;
+    }
 
     // OOM guard.
     if (this.metrics.totalResidentBytes + buffer.byteLength > MAX_RESIDENT_BYTES) {
@@ -612,9 +674,11 @@ class VideoCacheManager {
   // ---------------------------------------------------------------------------
 
   private purgeRegistry(
-    videoEl:  HTMLVideoElement,
+    videoEl: HTMLVideoElement,
     registry: ChunkRegistry
   ): void {
+    if (!this.activeRegistries.has(videoEl)) return;
+
     for (const [seqIndex, chunk] of registry.chunks.entries()) {
       if (chunk.objectUrl !== null) {
         URL.revokeObjectURL(chunk.objectUrl);
@@ -626,9 +690,11 @@ class VideoCacheManager {
       registry.chunks.delete(seqIndex);
     }
     registry.totalBytes          = 0;
-    registry.hlsSegmentUrls      = null;
+    registry.hlsSegmentUrls = null;
+    this.chunkMap.delete(videoEl);
+    this.activeRegistries.delete(videoEl);
     this.metrics.totalRegistries -= 1;
-    this.metrics.totalEvictions  += 1;
+    this.metrics.totalEvictions += 1;
   }
 
   private evictStalest(): void {

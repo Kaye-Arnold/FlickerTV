@@ -27,6 +27,8 @@ export interface FeedCinemaCard {
   directorName: string;
   synopsis: string;
   trailerUrl: string;
+  /** Optional source discriminator; legacy/search cards infer it from the URL. */
+  streamType?: StreamType;
   posterWebpUrl: string;
   backdropUrl: string;
   runtimeMinutes: number;

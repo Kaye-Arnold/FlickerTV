@@ -108,6 +108,12 @@ vercel --prod
 wrangler pages deploy out
 ```
 
+The exported app cannot attach Next.js `headers()` at request time. The
+repository therefore includes both `public/_headers` (Netlify and Cloudflare
+Pages) and `vercel.json` (Vercel) with the same security policy. Keep the
+appropriate file enabled for the target host; a CDN that cannot set response
+headers cannot enforce this CSP, especially `frame-ancestors`.
+
 ---
 
 ## Public Domain Film Sources

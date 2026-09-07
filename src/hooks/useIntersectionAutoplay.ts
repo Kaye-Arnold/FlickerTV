@@ -1,23 +1,19 @@
 'use client';
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, type RefObject } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface IntersectionAutoplayOptions {
-  /**
-   * Fraction of the element that must be visible to trigger play.
-   * Default: 0.6 (60% visible).
-   */
+  /** Fraction of the element that must be visible to trigger play. */
   visibilityThreshold?: number;
-  /**
-   * If true, the video will be muted before attempting autoplay.
-   * Browsers block unmuted autoplay — this ensures it works.
-   */
+  /** If true, mute the video before attempting autoplay. */
   muteOnAutoplay?: boolean;
-  onPlay?:  () => void;
+  /** Disable autoplay without removing the video element. */
+  enabled?: boolean;
+  onPlay?: () => void;
   onPause?: () => void;
 }
 
@@ -26,20 +22,17 @@ export interface IntersectionAutoplayOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * useIntersectionAutoplay
- *
- * Attaches an IntersectionObserver to a video element and plays/pauses it
- * automatically based on its viewport visibility. Handles the common
- * autoplay-policy rejection gracefully.
- *
- * Returns a ref to attach to the <video> element.
+ * Plays a video while it is visible and pauses it when it leaves the
+ * viewport. A request generation prevents a late play() promise from
+ * restarting a video after a rapid swipe or unmount.
  */
 export function useIntersectionAutoplay(
   options: IntersectionAutoplayOptions = {}
-): React.RefObject<HTMLVideoElement> {
+): RefObject<HTMLVideoElement> {
   const {
     visibilityThreshold = 0.6,
     muteOnAutoplay = true,
+    enabled = true,
     onPlay,
     onPause,
   } = options;
@@ -47,41 +40,70 @@ export function useIntersectionAutoplay(
   const videoRef = useRef<HTMLVideoElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
   const isPlayingRef = useRef(false);
+  const playRequestRef = useRef(0);
 
-  const attemptPlay = useCallback(async (video: HTMLVideoElement) => {
-    if (isPlayingRef.current) return;
-    if (muteOnAutoplay) video.muted = true;
+  const attemptPlay = useCallback(
+    async (video: HTMLVideoElement) => {
+      if (!enabled || isPlayingRef.current) return;
 
-    try {
-      await video.play();
-      isPlayingRef.current = true;
-      onPlay?.();
-    } catch (err) {
-      // AbortError is expected if the element leaves the viewport before play resolves.
-      if ((err as DOMException).name !== 'AbortError') {
-        console.warn('[useIntersectionAutoplay] Autoplay failed:', err);
+      const requestId = ++playRequestRef.current;
+      if (muteOnAutoplay) video.muted = true;
+
+      try {
+        await video.play();
+
+        if (
+          requestId !== playRequestRef.current ||
+          !enabled ||
+          !video.isConnected
+        ) {
+          video.pause();
+          return;
+        }
+
+        isPlayingRef.current = true;
+        onPlay?.();
+      } catch (error) {
+        if (requestId !== playRequestRef.current) return;
+
+        const name = error instanceof DOMException ? error.name : '';
+        if (name === 'AbortError' || name === 'NotAllowedError') {
+          // These are normal browser outcomes when a swipe or autoplay policy
+          // interrupts the request. The user can still start playback manually.
+          return;
+        }
+
+        console.warn('[useIntersectionAutoplay] Autoplay failed:', error);
       }
-    }
-  }, [muteOnAutoplay, onPlay]);
+    },
+    [enabled, muteOnAutoplay, onPlay]
+  );
 
-  const attemptPause = useCallback((video: HTMLVideoElement) => {
-    if (!isPlayingRef.current) return;
-    video.pause();
-    isPlayingRef.current = false;
-    onPause?.();
-  }, [onPause]);
+  const attemptPause = useCallback(
+    (video: HTMLVideoElement) => {
+      // Invalidate any pending play() promise before pausing.
+      playRequestRef.current += 1;
+      if (!video.paused) video.pause();
+
+      if (isPlayingRef.current) {
+        isPlayingRef.current = false;
+        onPause?.();
+      }
+    },
+    [onPause]
+  );
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || typeof IntersectionObserver === 'undefined') return;
+    if (!enabled || !video || typeof IntersectionObserver === 'undefined') {
+      return;
+    }
 
-    observerRef.current = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
+    const observer = new IntersectionObserver(
+      ([entry]) => {
         if (!entry) return;
-
         if (entry.isIntersecting) {
-          attemptPlay(video);
+          void attemptPlay(video);
         } else {
           attemptPause(video);
         }
@@ -92,22 +114,15 @@ export function useIntersectionAutoplay(
       }
     );
 
-    observerRef.current.observe(video);
+    observerRef.current = observer;
+    observer.observe(video);
 
     return () => {
-      observerRef.current?.disconnect();
+      observer.disconnect();
+      observerRef.current = null;
+      attemptPause(video);
     };
-  }, [visibilityThreshold, attemptPlay, attemptPause]);
-
-  // Pause on unmount to clean up.
-  useEffect(() => {
-    return () => {
-      const video = videoRef.current;
-      if (video && isPlayingRef.current) {
-        video.pause();
-      }
-    };
-  }, []);
+  }, [attemptPause, attemptPlay, enabled, visibilityThreshold]);
 
   return videoRef;
 }

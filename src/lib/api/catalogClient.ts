@@ -36,6 +36,7 @@ import type {
 } from '@/types/schema';
 import type { CinemaCard as FeedCinemaCard } from '@/components/Feed/SwiperFeed';
 import { SEED_REEL } from '@/lib/data/seedReel';
+import { validateCatalogPayload } from '@/lib/catalog/validateCatalog';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -94,6 +95,7 @@ function convertToFeedCard(card: IngestCinemaCard): FeedCinemaCard {
     directorName:   card.metadata.director ?? 'Unknown',
     synopsis:       card.description || card.title,
     trailerUrl,
+    streamType:    card.streamType,
     posterWebpUrl:  card.posterUrl,
     backdropUrl:    card.posterUrl,
     runtimeMinutes: card.duration ? Math.round(card.duration / 60) : 60,
@@ -157,10 +159,13 @@ function inferGenres(card: IngestCinemaCard): string[] {
 // Fetch with timeout
 // ---------------------------------------------------------------------------
 
-async function fetchCatalogJson(url: string): Promise<CatalogGist> {
+async function fetchCatalogJson(
+  url: string,
+  signal?: AbortSignal
+): Promise<CatalogGist> {
   const response = await fetch(url, {
     cache:   'no-cache',       // Let the SW / HTTP cache handle caching.
-    signal:  AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal:  signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS),
     headers: {
       'Accept': 'application/json',
     },
@@ -173,19 +178,7 @@ async function fetchCatalogJson(url: string): Promise<CatalogGist> {
   }
 
   const data = await response.json() as unknown;
-
-  // Validate top-level structure before trusting the payload.
-  if (
-    !data ||
-    typeof data !== 'object' ||
-    !Array.isArray((data as Record<string, unknown>)['catalog'])
-  ) {
-    throw new Error(
-      '[CatalogClient] Gist response does not match CatalogGist schema.'
-    );
-  }
-
-  return data as CatalogGist;
+  return validateCatalogPayload(data);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +234,7 @@ export async function fetchCatalog(options: {
 
   // ── Fresh fetch ────────────────────────────────────────────────────────────
   try {
-    const catalog = await fetchCatalogJson(GIST_CATALOG_URL);
+    const catalog = await fetchCatalogJson(GIST_CATALOG_URL, signal);
 
     _sessionCache = {
       catalog,

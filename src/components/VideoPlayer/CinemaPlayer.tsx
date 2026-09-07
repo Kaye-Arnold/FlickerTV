@@ -9,6 +9,7 @@ import React, {
 import { motion, AnimatePresence } from 'framer-motion';
 import WaitingRoom from './WaitingRoom';
 import { getVideoCacheManager } from '@/lib/memory/VideoCacheManager';
+import type Hls from 'hls.js';
 import type { CinemaCard } from '@/components/Feed/SwiperFeed';
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,7 @@ interface PlayerState {
   isBuffering:          boolean;
   hasError:             boolean;
   errorMessage:         string | null;
+  notice:               string | null;
   isWaitingRoomVisible: boolean;
   showControls:         boolean;
   isFullscreen:         boolean;
@@ -33,6 +35,8 @@ export interface CinemaPlayerProps {
   card:            CinemaCard;
   autoPlay?:       boolean;
   initiallyMuted?: boolean;
+  /** Reduce HLS buffering when the network hook has enabled Turbo Mode. */
+  turboMode?:      boolean;
   startAtSeconds?: number;
   onEnded?:        (tmdbId: string) => void;
   onError?:        (tmdbId: string, err: string) => void;
@@ -68,6 +72,12 @@ const CONTROLS_HIDE_DELAY_MS = 3500;
 // revocation and free the backing ArrayBuffer reference.
 const INITIAL_CHUNK_SEQUENCE_INDEX = 0;
 
+function isHlsSource(card: CinemaCard): boolean {
+  if (card.streamType === 'hls') return true;
+  const sourceWithoutQuery = card.trailerUrl.split(/[?#]/, 1)[0] ?? card.trailerUrl;
+  return sourceWithoutQuery.toLowerCase().endsWith('.m3u8');
+}
+
 // ---------------------------------------------------------------------------
 // Seek Bar
 // ---------------------------------------------------------------------------
@@ -79,9 +89,6 @@ const SeekBar: React.FC<{
   onSeek:             (seconds: number) => void;
 }> = ({ currentTimeSeconds, durationSeconds, bufferedPercent, onSeek }) => {
   const trackRef = useRef<HTMLDivElement>(null);
-
-  const progressPercent =
-    durationSeconds > 0 ? (currentTimeSeconds / durationSeconds) * 100 : 0;
 
   const handleTrackClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -107,12 +114,47 @@ const SeekBar: React.FC<{
     [durationSeconds, onSeek]
   );
 
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (durationSeconds <= 0) return;
+
+      let nextSeconds: number | null = null;
+      switch (e.key) {
+        case 'ArrowLeft':
+          nextSeconds = currentTimeSeconds - 5;
+          break;
+        case 'ArrowRight':
+          nextSeconds = currentTimeSeconds + 5;
+          break;
+        case 'Home':
+          nextSeconds = 0;
+          break;
+        case 'End':
+          nextSeconds = durationSeconds;
+          break;
+        default:
+          return;
+      }
+
+      e.preventDefault();
+      onSeek(Math.max(0, Math.min(durationSeconds, nextSeconds)));
+    },
+    [currentTimeSeconds, durationSeconds, onSeek]
+  );
+
+  const progressPercent =
+    durationSeconds > 0
+      ? Math.max(0, Math.min(100, (currentTimeSeconds / durationSeconds) * 100))
+      : 0;
+  const safeBufferedPercent = Math.max(0, Math.min(100, bufferedPercent));
+
   return (
     <div
       ref={trackRef}
       className="cp-seek-track"
       onClick={handleTrackClick}
       onTouchMove={handleTouchMove}
+      onKeyDown={handleKeyDown}
       role="slider"
       aria-label="Seek"
       aria-valuemin={0}
@@ -123,7 +165,7 @@ const SeekBar: React.FC<{
     >
       <div
         className="cp-seek-buffered"
-        style={{ width: `${bufferedPercent}%` }}
+        style={{ width: `${safeBufferedPercent}%` }}
       />
       <div
         className="cp-seek-progress"
@@ -254,6 +296,7 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   card,
   autoPlay       = true,
   initiallyMuted = true,
+  turboMode      = false,
   startAtSeconds = 0,
   onEnded,
   onError,
@@ -263,6 +306,12 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
   const containerRef    = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSeekRef = useRef(startAtSeconds);
+  const hlsRef = useRef<Hls | null>(null);
+  const sourceGenerationRef = useRef(0);
+  const hlsRecoveryAttemptsRef = useRef(0);
+  const waitingRoomDismissedRef = useRef(false);
+  const sourceUrl = card.trailerUrl;
+  const sourceIsHls = isHlsSource(card);
   // Tracks whether consumeChunk has fired for the current card to prevent
   // duplicate revocations if 'playing' fires more than once (e.g. after seek).
   const chunkConsumedRef = useRef(false);
@@ -276,10 +325,32 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     isBuffering:          true,
     hasError:             false,
     errorMessage:         null,
+    notice:               null,
     isWaitingRoomVisible: true,
     showControls:         true,
     isFullscreen:         false,
   });
+
+  const setPlaybackError = useCallback(
+    (message: string, error?: unknown) => {
+      if (error !== undefined) {
+        console.error(`[CinemaPlayer] ${message}`, error);
+      } else {
+        console.error(`[CinemaPlayer] ${message}`);
+      }
+      setPlayerState((prev) => ({
+        ...prev,
+        hasError: true,
+        errorMessage: message,
+        notice: null,
+        isBuffering: false,
+        isPlaying: false,
+        isWaitingRoomVisible: false,
+      }));
+      onError?.(card.tmdbId, message);
+    },
+    [card.tmdbId, onError]
+  );
 
   // ── C4 FIX: Register video element with VideoCacheManager ─────────────────
   // The cache manager is wired here at mount time. An event listener on the
@@ -290,41 +361,22 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     const video = videoRef.current;
     if (!video || typeof window === 'undefined') return;
 
-    let mgr: ReturnType<typeof getVideoCacheManager> | null = null;
-
-    try {
-      mgr = getVideoCacheManager();
-      mgr.registerVideoElement(video);
-    } catch {
-      // VideoCacheManager not available in SSR — safe to ignore.
-      return;
-    }
-
-    const capturedMgr = mgr;
+    const cacheManager = getVideoCacheManager();
+    cacheManager.registerVideoElement(video);
 
     const handlePlaying = () => {
       // Guard: only consume once per card lifetime to prevent double-revocation
       // if 'playing' is re-fired after a seek or quality switch.
       if (chunkConsumedRef.current) return;
       chunkConsumedRef.current = true;
-
-      try {
-        capturedMgr.consumeChunk(video, INITIAL_CHUNK_SEQUENCE_INDEX);
-      } catch {
-        // consumeChunk is a no-op if no chunk was registered at this index,
-        // which is expected for directly-streamed URLs that bypass storeChunk().
-      }
+      cacheManager.consumeChunk(video, INITIAL_CHUNK_SEQUENCE_INDEX);
     };
 
     video.addEventListener('playing', handlePlaying);
 
     return () => {
       video.removeEventListener('playing', handlePlaying);
-      try {
-        capturedMgr.releaseRegistry(video);
-      } catch {
-        // ignore
-      }
+      cacheManager.releaseRegistry(video);
     };
   }, []);
 
@@ -335,38 +387,160 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     pendingSeekRef.current = startAtSeconds;
   }, [card.tmdbId, startAtSeconds]);
 
-  // Sync video src when card changes.
+  // Sync the media element when the card changes. Native HLS is preferred on
+  // Safari; hls.js provides Media Source Extensions playback elsewhere.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    video.src = card.trailerUrl;
+    const generation = ++sourceGenerationRef.current;
+    hlsRecoveryAttemptsRef.current = 0;
+    waitingRoomDismissedRef.current = false;
+
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+    video.pause();
+    video.removeAttribute('src');
     video.load();
 
     setPlayerState((prev) => ({
       ...prev,
       isWaitingRoomVisible: true,
-      currentTimeSeconds:   0,
-      durationSeconds:      0,
-      bufferedPercent:      0,
-      isBuffering:          true,
-      hasError:             false,
-      errorMessage:         null,
+      isMuted: initiallyMuted,
+      currentTimeSeconds: 0,
+      durationSeconds: 0,
+      bufferedPercent: 0,
+      isBuffering: true,
+      hasError: false,
+      errorMessage: null,
+      notice: null,
+      isPlaying: false,
     }));
-  }, [card.tmdbId, card.trailerUrl]);
+
+    const setDirectSource = () => {
+      if (generation !== sourceGenerationRef.current) return;
+      video.src = sourceUrl;
+      video.load();
+    };
+
+    if (!sourceIsHls || video.canPlayType('application/vnd.apple.mpegurl') !== '') {
+      setDirectSource();
+    } else {
+      void import('hls.js')
+        .then(({ default: HlsConstructor }) => {
+          if (generation !== sourceGenerationRef.current) return;
+
+          if (!HlsConstructor.isSupported()) {
+            setPlaybackError('This browser cannot play HLS streams.');
+            return;
+          }
+
+          const hls = new HlsConstructor({
+            enableWorker: true,
+            lowLatencyMode: false,
+            capLevelToPlayerSize: true,
+            startLevel: turboMode ? 0 : -1,
+            maxBufferLength: turboMode ? 12 : 30,
+            maxMaxBufferLength: turboMode ? 20 : 60,
+            backBufferLength: turboMode ? 10 : 30,
+          });
+
+          hlsRef.current = hls;
+          hls.on(HlsConstructor.Events.ERROR, (_event, data) => {
+            if (
+              generation !== sourceGenerationRef.current ||
+              !data.fatal
+            ) {
+              return;
+            }
+
+            if (
+              data.type === HlsConstructor.ErrorTypes.NETWORK_ERROR &&
+              hlsRecoveryAttemptsRef.current < 1
+            ) {
+              hlsRecoveryAttemptsRef.current += 1;
+              hls.startLoad();
+              return;
+            }
+
+            if (
+              data.type === HlsConstructor.ErrorTypes.MEDIA_ERROR &&
+              hlsRecoveryAttemptsRef.current < 2
+            ) {
+              hlsRecoveryAttemptsRef.current += 1;
+              hls.recoverMediaError();
+              return;
+            }
+
+            setPlaybackError(
+              `HLS stream error: ${data.details}`,
+              data.error
+            );
+          });
+
+          hls.loadSource(sourceUrl);
+          hls.attachMedia(video);
+        })
+        .catch((error: unknown) => {
+          if (generation !== sourceGenerationRef.current) return;
+          setPlaybackError('The HLS player could not be loaded.', error);
+        });
+    }
+
+    return () => {
+      sourceGenerationRef.current += 1;
+      hlsRef.current?.destroy();
+      hlsRef.current = null;
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    };
+  }, [
+    sourceIsHls,
+    sourceUrl,
+    initiallyMuted,
+    setPlaybackError,
+    turboMode,
+  ]);
 
   // Auto-play once the waiting room signals ready.
   const handleWaitingRoomReady = useCallback(() => {
-    setPlayerState((prev) => ({ ...prev, isWaitingRoomVisible: false }));
+    if (waitingRoomDismissedRef.current) return;
+    waitingRoomDismissedRef.current = true;
+
+    setPlayerState((prev) => ({
+      ...prev,
+      isWaitingRoomVisible: false,
+      isBuffering: false,
+    }));
     const video = videoRef.current;
     if (!video || !autoPlay) return;
 
+    const generation = sourceGenerationRef.current;
     video.muted = initiallyMuted;
-    video
+    void video
       .play()
-      .then(() => setPlayerState((prev) => ({ ...prev, isPlaying: true })))
-      .catch(() => setPlayerState((prev) => ({ ...prev, isPlaying: false })));
-  }, [autoPlay, initiallyMuted]);
+      .then(() => {
+        if (generation !== sourceGenerationRef.current) return;
+        setPlayerState((prev) => ({ ...prev, isPlaying: true }));
+      })
+      .catch((error: unknown) => {
+        if (generation !== sourceGenerationRef.current) return;
+        const name = error instanceof DOMException ? error.name : '';
+        if (name === 'NotAllowedError') {
+          // Autoplay policy requires an explicit user gesture. The controls
+          // remain visible so the user can start playback manually.
+          setPlayerState((prev) => ({
+            ...prev,
+            isPlaying: false,
+            showControls: true,
+            notice: 'Tap Play to start playback in this browser.',
+          }));
+          return;
+        }
+        setPlaybackError('Playback could not start.', error);
+      });
+  }, [autoPlay, initiallyMuted, setPlaybackError]);
 
 
   // ── Video event handlers ─────────────────────────────────────────────────
@@ -399,8 +573,8 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
   const handleCanPlay = useCallback(() => {
     setPlayerState((prev) => ({ ...prev, isBuffering: false }));
-    window.dispatchEvent(new CustomEvent(`flicker:stream-ready:${card.tmdbId}`));
-  }, [card.tmdbId]);
+    handleWaitingRoomReady();
+  }, [handleWaitingRoomReady]);
 
   const handleWaiting = useCallback(() => {
     setPlayerState((prev) => ({ ...prev, isBuffering: true }));
@@ -427,20 +601,18 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
 
   const handleVideoError = useCallback(() => {
     const video = videoRef.current;
-    const msg   = video?.error?.message ?? 'Stream unavailable from this node.';
-    setPlayerState((prev) => ({
-      ...prev,
-      hasError:    true,
-      errorMessage: msg,
-      isBuffering:  false,
-    }));
-    onError?.(card.tmdbId, msg);
-  }, [card.tmdbId, onError]);
+    const msg = video?.error?.message ?? 'Stream unavailable from this node.';
+    setPlaybackError(msg, video?.error ?? undefined);
+  }, [setPlaybackError]);
 
   // ── Control actions ──────────────────────────────────────────────────────
 
   const resetControlsTimer = useCallback(() => {
-    setPlayerState((prev) => ({ ...prev, showControls: true }));
+    setPlayerState((prev) => ({
+      ...prev,
+      showControls: true,
+      notice: null,
+    }));
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     controlsTimerRef.current = setTimeout(() => {
       setPlayerState((prev) =>
@@ -454,17 +626,34 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
     if (!video) return;
 
     if (video.paused) {
-      video
+      const generation = sourceGenerationRef.current;
+      void video
         .play()
-        .then(() => setPlayerState((prev) => ({ ...prev, isPlaying: true })))
-        .catch(() => {});
+        .then(() => {
+          if (generation !== sourceGenerationRef.current) return;
+          setPlayerState((prev) => ({ ...prev, isPlaying: true }));
+        })
+        .catch((error: unknown) => {
+          if (generation !== sourceGenerationRef.current) return;
+          const name = error instanceof DOMException ? error.name : '';
+          if (name === 'NotAllowedError') {
+            setPlayerState((prev) => ({
+              ...prev,
+              isPlaying: false,
+              showControls: true,
+              notice: 'Tap Play to start playback in this browser.',
+            }));
+            return;
+          }
+          setPlaybackError('Playback could not start.', error);
+        });
     } else {
       video.pause();
       setPlayerState((prev) => ({ ...prev, isPlaying: false }));
     }
 
     resetControlsTimer();
-  }, [resetControlsTimer]);
+  }, [resetControlsTimer, setPlaybackError]);
 
   const handleMuteToggle = useCallback(() => {
     const video = videoRef.current;
@@ -496,8 +685,12 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
         await document.exitFullscreen();
         setPlayerState((prev) => ({ ...prev, isFullscreen: false }));
       }
-    } catch {
-      // Fullscreen API rejected — iOS Safari limitation
+    } catch (error: unknown) {
+      console.warn('[CinemaPlayer] Fullscreen request was rejected:', error);
+      setPlayerState((prev) => ({
+        ...prev,
+        notice: 'Fullscreen is not available in this browser.',
+      }));
     }
   }, []);
 
@@ -638,6 +831,21 @@ const CinemaPlayer: React.FC<CinemaPlayerProps> = ({
         </AnimatePresence>
 
         <div className="cp-scrim" aria-hidden="true" />
+
+        <AnimatePresence>
+          {playerState.notice && !playerState.hasError && (
+            <motion.div
+              key={playerState.notice}
+              className="cp-notice"
+              role="status"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+            >
+              {playerState.notice}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <AnimatePresence>
           {playerState.showControls &&
@@ -913,6 +1121,23 @@ const CINEMA_PLAYER_STYLES = `
   }
 
   @keyframes cpSpin { to { transform: rotate(360deg); } }
+
+  .cp-notice {
+    position: absolute;
+    left: 50%;
+    bottom: 112px;
+    z-index: 7;
+    transform: translateX(-50%);
+    max-width: min(420px, calc(100% - 32px));
+    padding: 9px 14px;
+    border: 1px solid rgba(200,169,110,0.35);
+    border-radius: 999px;
+    background: rgba(10,10,22,0.82);
+    color: rgba(255,255,255,0.88);
+    font-size: 12px;
+    text-align: center;
+    pointer-events: none;
+  }
 
   .cp-error {
     position: absolute;

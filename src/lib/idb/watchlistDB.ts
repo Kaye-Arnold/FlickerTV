@@ -7,7 +7,8 @@
  *  - Recently viewed identifiers (feed personalisation)
  *
  * Uses the `idb` wrapper library for a promise-based IndexedDB API.
- * Falls back silently if IndexedDB is unavailable (private browsing, SSR).
+ * Keeps the UI usable when IndexedDB is unavailable (private browsing, SSR)
+ * while exposing the last operation and failure through diagnostics.
  */
 
 import { openDB, type IDBPDatabase, type DBSchema } from 'idb';
@@ -55,6 +56,44 @@ const MAX_RECENTLY_VIEWED = 50;
 
 let _db: IDBPDatabase<FlickerDBSchema> | null = null;
 
+export type IndexedDbStatus = 'unknown' | 'available' | 'error';
+
+export interface IndexedDbDiagnostics {
+  status: IndexedDbStatus;
+  operation: string | null;
+  message: string | null;
+  checkedAt: number | null;
+}
+
+let _diagnostics: IndexedDbDiagnostics = {
+  status: 'unknown',
+  operation: null,
+  message: null,
+  checkedAt: null,
+};
+
+function updateDiagnostics(
+  status: IndexedDbStatus,
+  operation: string,
+  error?: unknown
+): void {
+  _diagnostics = {
+    status,
+    operation,
+    message:
+      error instanceof Error
+        ? error.message
+        : error === undefined
+        ? null
+        : String(error),
+    checkedAt: Date.now(),
+  };
+}
+
+export function getIndexedDbDiagnostics(): IndexedDbDiagnostics {
+  return { ..._diagnostics };
+}
+
 async function getDB(): Promise<IDBPDatabase<FlickerDBSchema>> {
   if (_db !== null) return _db;
 
@@ -94,20 +133,25 @@ async function getDB(): Promise<IDBPDatabase<FlickerDBSchema>> {
 }
 
 // ---------------------------------------------------------------------------
-// Safety wrapper — all public functions swallow IDB errors gracefully.
-// The app must remain functional even when IDB is unavailable.
+// Safety wrapper — public operations keep the app usable when storage is
+// unavailable, while diagnostics preserve the actual failure for the UI and
+// support tooling instead of silently discarding it.
 // ---------------------------------------------------------------------------
 
 async function safeRun<T>(
+  operation: string,
   fn: (db: IDBPDatabase<FlickerDBSchema>) => Promise<T>,
   fallback: T
 ): Promise<T> {
   if (typeof window === 'undefined') return fallback;
   try {
     const db = await getDB();
-    return await fn(db);
-  } catch (err) {
-    console.warn('[FlickerDB] Operation failed:', err);
+    const result = await fn(db);
+    updateDiagnostics('available', operation);
+    return result;
+  } catch (error: unknown) {
+    updateDiagnostics('error', operation, error);
+    console.warn(`[FlickerDB] ${operation} failed:`, error);
     return fallback;
   }
 }
@@ -117,19 +161,19 @@ async function safeRun<T>(
 // ---------------------------------------------------------------------------
 
 export async function saveBookmark(card: CinemaCard): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('save bookmark', async (db) => {
     await db.put('bookmarks', { ...card, savedAt: Date.now() });
   }, undefined);
 }
 
 export async function removeBookmark(tmdbId: string): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('remove bookmark', async (db) => {
     await db.delete('bookmarks', tmdbId);
   }, undefined);
 }
 
 export async function getAllBookmarks(): Promise<CinemaCard[]> {
-  return safeRun(async (db) => {
+  return safeRun('load bookmarks', async (db) => {
     const all = await db.getAllFromIndex('bookmarks', 'by-savedAt');
     // Return newest first.
     return all.reverse().map(({ savedAt: _savedAt, ...card }) => card as CinemaCard);
@@ -137,14 +181,14 @@ export async function getAllBookmarks(): Promise<CinemaCard[]> {
 }
 
 export async function isBookmarked(tmdbId: string): Promise<boolean> {
-  return safeRun(async (db) => {
+  return safeRun('check bookmark', async (db) => {
     const record = await db.get('bookmarks', tmdbId);
     return record !== undefined;
   }, false);
 }
 
 export async function getBookmarkCount(): Promise<number> {
-  return safeRun(async (db) => {
+  return safeRun('count bookmarks', async (db) => {
     return db.count('bookmarks');
   }, 0);
 }
@@ -167,7 +211,7 @@ export async function saveProgress(
   currentSeconds: number,
   durationSeconds: number
 ): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('save progress', async (db) => {
     await db.put('progress', {
       tmdbId,
       currentSeconds,
@@ -180,7 +224,7 @@ export async function saveProgress(
 export async function getProgress(
   tmdbId: string
 ): Promise<WatchProgress | null> {
-  return safeRun(async (db) => {
+  return safeRun('load progress', async (db) => {
     const record = await db.get('progress', tmdbId);
     if (!record) return null;
     return {
@@ -194,13 +238,13 @@ export async function getProgress(
 }
 
 export async function clearProgress(tmdbId: string): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('clear progress', async (db) => {
     await db.delete('progress', tmdbId);
   }, undefined);
 }
 
 export async function getAllProgress(): Promise<WatchProgress[]> {
-  return safeRun(async (db) => {
+  return safeRun('load all progress', async (db) => {
     const all = await db.getAll('progress');
     return all.map((r) => ({
       ...r,
@@ -220,7 +264,7 @@ export async function recordView(
   tmdbId: string,
   movieTitle: string
 ): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('record view', async (db) => {
     await db.put('recentlyViewed', {
       tmdbId,
       movieTitle,
@@ -246,14 +290,14 @@ export async function recordView(
 export async function getRecentlyViewed(): Promise<
   Array<{ tmdbId: string; movieTitle: string; viewedAt: number }>
 > {
-  return safeRun(async (db) => {
+  return safeRun('load recently viewed', async (db) => {
     const all = await db.getAllFromIndex('recentlyViewed', 'by-viewedAt');
     return all.reverse(); // newest first
   }, []);
 }
 
 export async function clearRecentlyViewed(): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('clear recently viewed', async (db) => {
     await db.clear('recentlyViewed');
   }, undefined);
 }
@@ -263,7 +307,7 @@ export async function clearRecentlyViewed(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function clearAllData(): Promise<void> {
-  await safeRun(async (db) => {
+  await safeRun('clear all data', async (db) => {
     const tx = db.transaction(
       ['bookmarks', 'progress', 'recentlyViewed'],
       'readwrite'
@@ -283,7 +327,7 @@ export async function getDatabaseSizeEstimate(): Promise<{
   recentlyViewed: number;
   total: number;
 }> {
-  return safeRun(async (db) => {
+  return safeRun('estimate database size', async (db) => {
     const [bookmarks, progress, recentlyViewed] = await Promise.all([
       db.count('bookmarks'),
       db.count('progress'),

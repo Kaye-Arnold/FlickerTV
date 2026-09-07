@@ -8,7 +8,12 @@ import {
   invalidateCatalogCache,
   getCatalogCacheInfo,
 } from '@/lib/api/catalogClient';
-import { clearAllData, getDatabaseSizeEstimate } from '@/lib/idb/watchlistDB';
+import {
+  clearAllData,
+  getDatabaseSizeEstimate,
+  getIndexedDbDiagnostics,
+  type IndexedDbDiagnostics,
+} from '@/lib/idb/watchlistDB';
 import { formatBytes } from '@/lib/utils/formatters';
 
 // ---------------------------------------------------------------------------
@@ -75,6 +80,9 @@ export default function SettingsPage() {
   const [dbStats,        setDbStats       ] = useState<{
     bookmarks: number; progress: number; recentlyViewed: number; total: number;
   } | null>(null);
+  const [dbDiagnostics, setDbDiagnostics] = useState<IndexedDbDiagnostics>(
+    getIndexedDbDiagnostics()
+  );
   const [catalogInfo, setCatalogInfo] = useState<{
     isCached: boolean; ageMs: number | null; isStale: boolean; totalItems: number | null;
   } | null>(null);
@@ -84,7 +92,10 @@ export default function SettingsPage() {
       if (reg?.active) setSwVersion('flicker-tv-v1.0.0');
     });
 
-    getDatabaseSizeEstimate().then(setDbStats);
+    void getDatabaseSizeEstimate().then((stats) => {
+      setDbStats(stats);
+      setDbDiagnostics(getIndexedDbDiagnostics());
+    });
 
     setCatalogInfo(getCatalogCacheInfo());
   }, []);
@@ -102,6 +113,7 @@ export default function SettingsPage() {
     await clearAllData();
     const stats = await getDatabaseSizeEstimate();
     setDbStats(stats);
+    setDbDiagnostics(getIndexedDbDiagnostics());
     setDbCleared(true);
     setTimeout(() => setDbCleared(false), 2500);
   }, []);
@@ -215,6 +227,31 @@ export default function SettingsPage() {
           {/* ── Storage ── */}
           <SectionHeader title="STORAGE & CACHE" />
           <div className="settings-card">
+            <div className="network-info-row">
+              <span className="network-info-row__label">IndexedDB</span>
+              <span
+                className={`network-info-row__value ${
+                  dbDiagnostics.status === 'available'
+                    ? 'network-info-row__value--on'
+                    : dbDiagnostics.status === 'error'
+                    ? 'network-info-row__value--error'
+                    : ''
+                }`}
+              >
+                {dbDiagnostics.status === 'available'
+                  ? '● Available'
+                  : dbDiagnostics.status === 'error'
+                  ? '● Unavailable'
+                  : '● Checking'}
+              </span>
+            </div>
+            {dbDiagnostics.status === 'error' && dbDiagnostics.message && (
+              <p className="settings-storage-error" role="status">
+                Storage diagnostics: {dbDiagnostics.message}
+              </p>
+            )}
+            <div className="settings-divider" />
+
             <div className="settings-action-row">
               <div className="settings-row__text">
                 <span className="settings-row__label">Clear Film Cache</span>
@@ -443,6 +480,14 @@ const SETTINGS_STYLES = `
   }
   .network-info-row__value--on    { color: #4ade80; }
   .network-info-row__value--error { color: #f87171; }
+  .settings-storage-error {
+    margin: 0;
+    padding: 0 16px 12px;
+    color: #fca5a5;
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
   .settings-action-row {
     display: flex;
     align-items: center;

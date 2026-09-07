@@ -181,9 +181,10 @@ export default function SearchPage() {
   const [isLoading,       setIsLoading      ] = useState(false);
   const [activeGenreIndex, setActiveGenreIndex] = useState(0);
 
-  const inputRef     = useRef<HTMLInputElement>(null);
-  const debounceRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const abortRef     = useRef<AbortController | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const searchGenerationRef = useRef(0);
 
   const { bookmarkedIds, toggleBookmark, appendToReel } = useFeedStore();
 
@@ -196,40 +197,70 @@ export default function SearchPage() {
   // ---------------------------------------------------------------------------
 
   const executeSearch = useCallback(async (searchQuery: string) => {
-    if (!searchQuery.trim()) {
+    const normalizedQuery = searchQuery.trim();
+    const generation = ++searchGenerationRef.current;
+
+    abortRef.current?.abort();
+    abortRef.current = null;
+
+    if (!normalizedQuery) {
       setResults([]);
       setHasSearched(false);
+      setCommittedQuery('');
+      setError(null);
+      setIsLoading(false);
       return;
     }
 
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-
+    const controller = new AbortController();
+    abortRef.current = controller;
     setIsLoading(true);
     setError(null);
     setCommittedQuery(searchQuery);
 
     try {
-      const raw = await searchArchiveOrg(searchQuery, {
-        limit:  20,
-        signal: abortRef.current.signal,
+      const raw = await searchArchiveOrg(normalizedQuery, {
+        limit: 20,
+        signal: controller.signal,
       });
 
-      const cards = raw.map(archiveResultToCinemaCard);
+      if (
+        controller.signal.aborted ||
+        generation !== searchGenerationRef.current
+      ) {
+        return;
+      }
 
+      const cards = raw.map(archiveResultToCinemaCard);
       startTransition(() => {
+        if (generation !== searchGenerationRef.current) return;
         setResults(cards);
         setHasSearched(true);
         appendToReel(cards);
       });
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return;
+    } catch (error: unknown) {
+      if (
+        controller.signal.aborted ||
+        generation !== searchGenerationRef.current
+      ) {
+        return;
+      }
+
+      const errorName =
+        error instanceof DOMException || error instanceof Error ? error.name : '';
+      if (errorName === 'AbortError') return;
+
+      console.error('[SearchPage] Search request failed:', error);
       setError(
         'Could not reach the archive index. Check your connection and try again.'
       );
       setResults([]);
+      setHasSearched(true);
     } finally {
-      setIsLoading(false);
+      if (generation === searchGenerationRef.current) {
+        setIsLoading(false);
+        if (abortRef.current === controller) abortRef.current = null;
+      }
     }
   }, [appendToReel]); // appendToReel is stable (Zustand action ref is stable)
 
@@ -261,8 +292,13 @@ export default function SearchPage() {
   useEffect(() => {
     runDefaultSearch();
     return () => {
+      searchGenerationRef.current += 1;
       abortRef.current?.abort();
-      if (debounceRef.current) clearTimeout(debounceRef.current);
+      abortRef.current = null;
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
     };
   }, [runDefaultSearch]);
 
@@ -277,7 +313,8 @@ export default function SearchPage() {
 
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
-        executeSearch(val);
+        debounceRef.current = null;
+        void executeSearch(val);
       }, 480);
     },
     [executeSearch]
@@ -294,12 +331,20 @@ export default function SearchPage() {
   );
 
   const handleClear = useCallback(() => {
+    searchGenerationRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
     setQuery('');
+    setCommittedQuery('');
     setResults([]);
     setHasSearched(false);
     setError(null);
+    setIsLoading(false);
     inputRef.current?.focus();
-    abortRef.current?.abort();
   }, []);
 
   const handleGenreFilter = useCallback(

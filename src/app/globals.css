@@ -54,8 +54,6 @@ html {
   font-size: 16px;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-  /* Prevent pull-to-refresh interfering with vertical swipe feed */
-  overscroll-behavior-y: none;
 }
 
 body {
@@ -63,22 +61,31 @@ body {
   color: #ffffff;
   font-family: var(--flicker-font-sans);
   line-height: 1.5;
-  /* Lock scrollbar during full-screen feed to prevent layout shift */
-  overflow: hidden;
-  /* Full-height on mobile including notch / nav bar */
-  height: 100dvh;
-  width: 100vw;
-  overscroll-behavior: none;
+  min-height: 100dvh;
+  width: 100%;
+  overflow-x: hidden;
   /* Improve text rendering on OLED screens */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-#__next,
-main {
-  height: 100dvh;
+#__next {
+  min-height: 100dvh;
   width: 100%;
+}
+
+main {
+  min-height: 100dvh;
+  width: 100%;
+}
+
+/* The discovery reel is the only route that intentionally clips the viewport.
+   Utility pages retain normal document scrolling. */
+.fullscreen-feed-snap {
+  height: 100dvh;
+  min-height: 100dvh;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* --------------------------------------------------------------------------
@@ -142,10 +149,19 @@ main {
   gap: 20px;
   pointer-events: none;
   transition: opacity 0.5s var(--flicker-ease-cinematic);
+  /* Never leave the app hidden if hydration or a service worker is delayed. */
+  animation: flickerSplashAutoHide 0.5s var(--flicker-ease-cinematic) 2s forwards;
 }
 
 .flicker-splash--hidden {
   opacity: 0;
+}
+
+@keyframes flickerSplashAutoHide {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
 }
 
 .flicker-splash__wordmark {

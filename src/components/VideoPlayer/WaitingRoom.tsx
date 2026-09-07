@@ -224,6 +224,7 @@ const WaitingRoom: React.FC<WaitingRoomProps> = ({
   const startTimeRef = useRef<number>(Date.now());
   const triviaTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const phaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const readyFiredRef = useRef(false);
 
   // Randomise starting trivia index per film.
@@ -240,8 +241,15 @@ const WaitingRoom: React.FC<WaitingRoomProps> = ({
 
   // Phase state machine driven by internal timers.
   useEffect(() => {
+    readyFiredRef.current = false;
+    if (readyTimerRef.current !== null) {
+      clearTimeout(readyTimerRef.current);
+      readyTimerRef.current = null;
+    }
+
     if (forcePhase !== undefined) return; // externally controlled
 
+    setPhase('skeleton');
     startTimeRef.current = Date.now();
 
     // Phase 1 → 2 after PHASE_SKELETON_DURATION
@@ -257,6 +265,11 @@ const WaitingRoom: React.FC<WaitingRoomProps> = ({
     return () => {
       if (phaseTimerRef.current !== null) {
         clearTimeout(phaseTimerRef.current);
+        phaseTimerRef.current = null;
+      }
+      if (readyTimerRef.current !== null) {
+        clearTimeout(readyTimerRef.current);
+        readyTimerRef.current = null;
       }
     };
   }, [tmdbId, forcePhase]);
@@ -279,7 +292,13 @@ const WaitingRoom: React.FC<WaitingRoomProps> = ({
   // Allow external elapsed time to override phase (e.g., from a parent
   // that has already been counting since the fetch started).
   useEffect(() => {
-    if (externalElapsedMs === undefined || forcePhase !== undefined) return;
+    if (
+      externalElapsedMs === undefined ||
+      forcePhase !== undefined ||
+      readyFiredRef.current
+    ) {
+      return;
+    }
 
     if (externalElapsedMs >= PHASE_SKELETON_DURATION + PHASE_POSTER_DURATION) {
       setPhase('trivia');
@@ -296,16 +315,48 @@ const WaitingRoom: React.FC<WaitingRoomProps> = ({
     if (readyFiredRef.current) return;
     readyFiredRef.current = true;
 
-    // Stop trivia rotation.
+    // Stop all phase timers before beginning the exit transition.
     if (triviaTimerRef.current !== null) {
       clearInterval(triviaTimerRef.current);
+      triviaTimerRef.current = null;
+    }
+    if (phaseTimerRef.current !== null) {
+      clearTimeout(phaseTimerRef.current);
+      phaseTimerRef.current = null;
+    }
+    if (readyTimerRef.current !== null) {
+      clearTimeout(readyTimerRef.current);
     }
 
     setPhase('ready');
     // Give Framer Motion time to run the exit animation before the parent
-    // replaces WaitingRoom with the actual player.
-    setTimeout(onReady, 400);
+    // replaces WaitingRoom with the actual player. The timer is cancelled if
+    // the film changes or the component unmounts before the transition ends.
+    readyTimerRef.current = setTimeout(() => {
+      readyTimerRef.current = null;
+      onReady();
+    }, 400);
   }, [onReady]);
+
+  useEffect(() => {
+    if (forcePhase === 'ready') {
+      signalReady();
+    }
+  }, [forcePhase, signalReady]);
+
+  useEffect(() => {
+    return () => {
+      if (triviaTimerRef.current !== null) {
+        clearInterval(triviaTimerRef.current);
+      }
+      if (phaseTimerRef.current !== null) {
+        clearTimeout(phaseTimerRef.current);
+      }
+      if (readyTimerRef.current !== null) {
+        clearTimeout(readyTimerRef.current);
+      }
+    };
+  }, []);
 
   // Expose signalReady via a custom event for decoupled parents.
   useEffect(() => {
@@ -377,28 +428,7 @@ const WaitingRoom: React.FC<WaitingRoomProps> = ({
               )}
             </AnimatePresence>
 
-            {/* Debug: signal ready button — hidden in production */}
-            {process.env.NODE_ENV === 'development' && (
-              <button
-                onClick={signalReady}
-                style={{
-                  position: 'absolute',
-                  bottom: 24,
-                  right: 24,
-                  zIndex: 9999,
-                  background: 'rgba(255,255,255,0.15)',
-                  border: '1px solid rgba(255,255,255,0.3)',
-                  color: '#fff',
-                  padding: '6px 14px',
-                  borderRadius: 6,
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  backdropFilter: 'blur(8px)',
-                }}
-              >
-                [DEV] Signal Ready
-              </button>
-            )}
+
           </motion.div>
         )}
       </AnimatePresence>

@@ -1,49 +1,64 @@
 /**
  * Flicker.TV — Service Worker
- * Strategy: Cache-First for static assets, Network-First for API/stream URLs.
  *
  * Cache tiers:
- *   SHELL_CACHE   — App shell (HTML, JS, CSS, fonts, icons). Long-lived.
- *   POSTER_CACHE  — Film poster images. Stale-while-revalidate, 200-item LRU.
- *   RUNTIME_CACHE — API responses. Network-first with 10s timeout, 50-item LRU.
+ *   SHELL_CACHE   — the small offline application shell.
+ *   POSTER_CACHE  — film artwork, stale-while-revalidate, bounded by LRU.
+ *   RUNTIME_CACHE — pages, catalog data, and API responses, network-first.
  *
- * Video streams (archive.org) are intentionally NOT cached in SW — the
- * VideoCacheManager in the main thread handles blob memory for those.
+ * Video streams are deliberately excluded. Native media playback and
+ * VideoCacheManager own stream buffering and blob lifetime respectively.
  */
 
-const SW_VERSION = 'flicker-tv-v1.0.0';
+const SW_VERSION = 'flicker-tv-v1.1.0';
 
-const SHELL_CACHE   = `${SW_VERSION}-shell`;
-const POSTER_CACHE  = `${SW_VERSION}-posters`;
+const SHELL_CACHE = `${SW_VERSION}-shell`;
+const POSTER_CACHE = `${SW_VERSION}-posters`;
 const RUNTIME_CACHE = `${SW_VERSION}-runtime`;
 
-const SHELL_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-  '/icons/icon-192x192.png',
-  '/icons/icon-512x512.png',
-  '/icons/apple-touch-icon.png',
-];
+// Only list files that are present in /public. Hashed Next assets are cached
+// on first use by the shell route below, so the install cannot fail because a
+// generated filename changed.
+const SHELL_ASSETS = ['/', '/manifest.webmanifest'];
 
-const POSTER_ORIGINS = [
+const POSTER_HOSTS = new Set([
   'image.tmdb.org',
   'upload.wikimedia.org',
-];
+]);
 
-const STREAM_ORIGINS = [
-  'archive.org',
-  'ia800100.us.archive.org',
-  'ia600100.us.archive.org',
-  'ia400100.us.archive.org',
-];
+const CATALOG_HOSTS = new Set([
+  'gist.githubusercontent.com',
+  'raw.githubusercontent.com',
+]);
 
-const MAX_POSTER_ENTRIES  = 200;
+const MAX_POSTER_ENTRIES = 200;
 const MAX_RUNTIME_ENTRIES = 50;
-const NETWORK_TIMEOUT_MS  = 10_000;
+const NETWORK_TIMEOUT_MS = 10_000;
+
+function isArchiveMediaRequest(request, url) {
+  const archiveHost =
+    url.hostname === 'archive.org' ||
+    url.hostname.endsWith('.archive.org') ||
+    url.hostname === 'web.archive.org' ||
+    url.hostname.endsWith('.web.archive.org');
+
+  if (!archiveHost) return false;
+  if (request.destination === 'video' || request.destination === 'audio') {
+    return true;
+  }
+
+  return (
+    url.pathname.includes('/download/') &&
+    /\.(?:mp4|m3u8|m4s|ts|webm|ogv|mpeg)(?:$|[?#])/i.test(url.pathname + url.search)
+  );
+}
+
+function isCatalogRequest(url) {
+  return CATALOG_HOSTS.has(url.hostname);
+}
 
 // ---------------------------------------------------------------------------
-// Install — pre-cache shell assets
+// Install — pre-cache only the verified shell
 // ---------------------------------------------------------------------------
 
 self.addEventListener('install', (event) => {
@@ -52,14 +67,15 @@ self.addEventListener('install', (event) => {
       .open(SHELL_CACHE)
       .then((cache) => cache.addAll(SHELL_ASSETS))
       .then(() => self.skipWaiting())
-      .catch((err) =>
-        console.warn('[Flicker SW] Shell pre-cache failed:', err)
-      )
+      .catch((error) => {
+        console.error('[Flicker SW] Shell pre-cache failed; install aborted:', error);
+        throw error;
+      })
   );
 });
 
 // ---------------------------------------------------------------------------
-// Activate — prune stale caches from previous SW versions
+// Activate — prune stale caches from previous versions
 // ---------------------------------------------------------------------------
 
 self.addEventListener('activate', (event) => {
@@ -83,28 +99,33 @@ self.addEventListener('activate', (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Fetch — routing logic
+// Fetch — route only requests this worker can improve
 // ---------------------------------------------------------------------------
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // 1. Never intercept non-GET requests.
   if (request.method !== 'GET') return;
 
-  // 2. Never intercept video stream origins — let VideoCacheManager handle blobs.
-  if (STREAM_ORIGINS.some((origin) => url.hostname.includes(origin))) {
-    return; // fall through to browser default fetch
-  }
+  // The media element and VideoCacheManager need the original stream response.
+  if (isArchiveMediaRequest(request, url)) return;
 
-  // 3. Poster images — stale-while-revalidate.
-  if (POSTER_ORIGINS.some((origin) => url.hostname === origin)) {
-    event.respondWith(staleWhileRevalidate(request, POSTER_CACHE, MAX_POSTER_ENTRIES));
+  if (isCatalogRequest(url)) {
+    event.respondWith(networkFirst(request, RUNTIME_CACHE, MAX_RUNTIME_ENTRIES));
     return;
   }
 
-  // 4. App shell assets — cache-first.
+  if (
+    POSTER_HOSTS.has(url.hostname) ||
+    (request.destination === 'image' && url.hostname.endsWith('.archive.org'))
+  ) {
+    event.respondWith(
+      staleWhileRevalidate(request, POSTER_CACHE, MAX_POSTER_ENTRIES)
+    );
+    return;
+  }
+
   if (
     url.origin === self.location.origin &&
     (SHELL_ASSETS.includes(url.pathname) ||
@@ -116,41 +137,35 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 5. API calls (if any) — network-first with timeout fallback.
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(networkFirst(request, RUNTIME_CACHE, MAX_RUNTIME_ENTRIES));
-    return;
-  }
-
-  // 6. Default: network-first for all other same-origin requests.
   if (url.origin === self.location.origin) {
     event.respondWith(networkFirst(request, RUNTIME_CACHE, MAX_RUNTIME_ENTRIES));
   }
 });
 
 // ---------------------------------------------------------------------------
-// Strategy: Cache-First
+// Strategies
 // ---------------------------------------------------------------------------
 
 async function cacheFirst(request, cacheName) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(request);
-  if (cached) return cached;
+  if (cached) {
+    await touch(cache, request, cached);
+    return cached;
+  }
 
   try {
     const response = await fetch(request);
-    if (response.ok) {
-      cache.put(request, response.clone());
-    }
+    if (response.ok) await store(cache, request, response);
     return response;
-  } catch {
-    return new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
+  } catch (error) {
+    console.warn('[Flicker SW] Cache-first request failed:', error);
+    return new Response('Offline', {
+      status: 503,
+      statusText: 'Service Unavailable',
+    });
   }
 }
-
-// ---------------------------------------------------------------------------
-// Strategy: Stale-While-Revalidate with LRU eviction
-// ---------------------------------------------------------------------------
 
 async function staleWhileRevalidate(request, cacheName, maxEntries) {
   const cache = await caches.open(cacheName);
@@ -159,39 +174,49 @@ async function staleWhileRevalidate(request, cacheName, maxEntries) {
   const networkFetch = fetch(request)
     .then(async (response) => {
       if (response.ok) {
-        await cache.put(request, response.clone());
+        await store(cache, request, response);
         await trimCache(cache, maxEntries);
       }
       return response;
     })
-    .catch(() => null);
+    .catch((error) => {
+      console.warn('[Flicker SW] Poster revalidation failed:', error);
+      return null;
+    });
 
-  return cached ?? (await networkFetch) ?? new Response('Offline', { status: 503 });
+  if (cached) {
+    await touch(cache, request, cached);
+    return cached;
+  }
+
+  return (
+    (await networkFetch) ??
+    new Response('Offline', { status: 503, statusText: 'Service Unavailable' })
+  );
 }
-
-// ---------------------------------------------------------------------------
-// Strategy: Network-First with timeout
-// ---------------------------------------------------------------------------
 
 async function networkFirst(request, cacheName, maxEntries) {
   const cache = await caches.open(cacheName);
 
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('Network timeout')), NETWORK_TIMEOUT_MS)
-  );
-
   try {
-    const response = await Promise.race([fetch(request), timeoutPromise]);
+    const response = await fetchWithTimeout(request);
     if (response.ok) {
-      await cache.put(request, response.clone());
+      await store(cache, request, response);
       await trimCache(cache, maxEntries);
     }
     return response;
-  } catch {
+  } catch (error) {
+    console.warn('[Flicker SW] Network-first request failed:', error);
     const cached = await cache.match(request);
-    if (cached) return cached;
+    if (cached) {
+      await touch(cache, request, cached);
+      return cached;
+    }
     return new Response(
-      JSON.stringify({ error: 'Offline', message: 'No cached response available.' }),
+      JSON.stringify({
+        error: 'Offline',
+        message: 'No cached response available.',
+      }),
       {
         status: 503,
         headers: { 'Content-Type': 'application/json' },
@@ -200,14 +225,51 @@ async function networkFirst(request, cacheName, maxEntries) {
   }
 }
 
+function fetchWithTimeout(request) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+
+  return fetch(request, { signal: controller.signal }).finally(() => {
+    clearTimeout(timeoutId);
+  });
+}
+
 // ---------------------------------------------------------------------------
-// LRU eviction helper — trims cache to maxEntries by removing oldest first
+// Cache helpers
 // ---------------------------------------------------------------------------
+
+async function store(cache, request, response) {
+  try {
+    await cache.put(request, response.clone());
+  } catch (error) {
+    // A browser may reject an opaque or quota-limited response. Playback or
+    // the network response remains usable; the cache simply stays unchanged.
+    console.warn('[Flicker SW] Cache write skipped:', error);
+  }
+}
+
+async function touch(cache, request, response) {
+  // Cache API does not expose access timestamps. Delete/reinsert makes the
+  // key order an access order for trimCache in browsers that preserve it.
+  try {
+    await cache.delete(request);
+    await cache.put(request, response.clone());
+  } catch (error) {
+    console.warn('[Flicker SW] Cache touch skipped:', error);
+  }
+}
 
 async function trimCache(cache, maxEntries) {
   const keys = await cache.keys();
-  if (keys.length > maxEntries) {
-    const toDelete = keys.slice(0, keys.length - maxEntries);
-    await Promise.all(toDelete.map((key) => cache.delete(key)));
-  }
+  if (keys.length <= maxEntries) return;
+
+  const toDelete = keys.slice(0, keys.length - maxEntries);
+  await Promise.all(
+    toDelete.map((key) =>
+      cache.delete(key).catch((error) => {
+        console.warn('[Flicker SW] Cache eviction failed:', error);
+        return false;
+      })
+    )
+  );
 }

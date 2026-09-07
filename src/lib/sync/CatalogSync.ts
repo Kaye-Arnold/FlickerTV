@@ -31,6 +31,7 @@
 import type { CinemaCard, CatalogGist } from '@/types/schema';
 import type { CinemaCard as FeedCard }  from '@/components/Feed/SwiperFeed';
 import { SEED_REEL }                    from '@/lib/data/seedReel';
+import { validateCatalogPayload }       from '@/lib/catalog/validateCatalog';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -84,19 +85,30 @@ let _memoryCache: MemoryCache | null = null;
 
 function readLocalStorageCache(): StoredCache | null {
   if (typeof window === 'undefined') return null;
+
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredCache;
+
+    const parsed = JSON.parse(raw) as {
+      catalog?: unknown;
+      cachedAt?: unknown;
+    };
     if (
-      !parsed.catalog ||
-      !Array.isArray(parsed.catalog.catalog) ||
-      typeof parsed.cachedAt !== 'number'
+      typeof parsed.cachedAt !== 'number' ||
+      !Number.isFinite(parsed.cachedAt) ||
+      parsed.cachedAt < 0
     ) {
-      return null;
+      throw new Error('[CatalogSync] Stored cache timestamp is invalid.');
     }
-    return parsed;
-  } catch {
+
+    return {
+      catalog: validateCatalogPayload(parsed.catalog),
+      cachedAt: parsed.cachedAt,
+    };
+  } catch (error: unknown) {
+    console.warn('[CatalogSync] Discarding invalid local catalog cache:', error);
+    clearLocalStorageCache();
     return null;
   }
 }
@@ -106,8 +118,9 @@ function writeLocalStorageCache(catalog: CatalogGist): void {
   try {
     const entry: StoredCache = { catalog, cachedAt: Date.now() };
     localStorage.setItem(CACHE_KEY, JSON.stringify(entry));
-  } catch {
-    // Storage quota exceeded or private browsing — non-fatal.
+  } catch (error: unknown) {
+    // Storage quota exceeded or private browsing — network data remains usable.
+    console.warn('[CatalogSync] Could not persist catalog cache:', error);
   }
 }
 
@@ -115,7 +128,9 @@ function clearLocalStorageCache(): void {
   if (typeof window === 'undefined') return;
   try {
     localStorage.removeItem(CACHE_KEY);
-  } catch { /* ignore */ }
+  } catch (error: unknown) {
+    console.warn('[CatalogSync] Could not clear the local catalog cache:', error);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +166,7 @@ function toFeedCard(card: CinemaCard): FeedCard {
     directorName:   card.metadata.director ?? 'Unknown',
     synopsis:       card.description || card.title,
     trailerUrl:     card.streamUrl,
+    streamType:     card.streamType,
     posterWebpUrl:  card.posterUrl,
     backdropUrl:    card.posterUrl,
     runtimeMinutes: card.duration ? Math.round(card.duration / 60) : 60,
@@ -235,16 +251,7 @@ async function fetchGist(signal?: AbortSignal): Promise<CatalogGist> {
   }
 
   const data = await response.json() as unknown;
-
-  if (
-    !data ||
-    typeof data !== 'object' ||
-    !Array.isArray((data as Record<string, unknown>)['catalog'])
-  ) {
-    throw new Error('[CatalogSync] Response does not match CatalogGist schema.');
-  }
-
-  const catalog = data as CatalogGist;
+  const catalog = validateCatalogPayload(data);
 
   if (!isCatalogValid(catalog)) {
     throw new Error(
@@ -348,6 +355,7 @@ export async function fetchCatalog(options: {
 
     return buildResult(catalog, now, 'gist', limit);
   } catch (err) {
+    if (signal?.aborted) throw err;
     console.error('[CatalogSync] Network fetch failed:', err);
 
     // Serve whatever we have — stale cache or seed reel.

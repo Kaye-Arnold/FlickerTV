@@ -1,4 +1,3 @@
-
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -24,15 +23,44 @@ export interface NetworkQualityState {
 }
 
 interface NetworkInformation extends EventTarget {
-  readonly effectiveType?: NetworkEffectiveType;
+  readonly effectiveType?: string;
   readonly downlink?: number;
   readonly rtt?: number;
   readonly saveData?: boolean;
 }
 
+type NavigatorWithConnection = Navigator & {
+  connection?: NetworkInformation;
+  mozConnection?: NetworkInformation;
+  webkitConnection?: NetworkInformation;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function getConnection(): NetworkInformation | undefined {
+  if (typeof navigator === 'undefined') return undefined;
+
+  const withConnection = navigator as NavigatorWithConnection;
+  return (
+    withConnection.connection ??
+    withConnection.mozConnection ??
+    withConnection.webkitConnection
+  );
+}
+
+function normaliseEffectiveType(value: string | undefined): NetworkEffectiveType {
+  switch (value) {
+    case '4g':
+    case '3g':
+    case '2g':
+    case 'slow-2g':
+      return value;
+    default:
+      return 'unknown';
+  }
+}
 
 function readNetworkState(): NetworkQualityState {
   if (typeof navigator === 'undefined') {
@@ -46,35 +74,25 @@ function readNetworkState(): NetworkQualityState {
     };
   }
 
-  const conn = (
-    navigator as Navigator & {
-      connection?: NetworkInformation;
-      mozConnection?: NetworkInformation;
-      webkitConnection?: NetworkInformation;
-    }
-  ).connection ??
-    (navigator as Navigator & { mozConnection?: NetworkInformation })
-      .mozConnection ??
-    (navigator as Navigator & { webkitConnection?: NetworkInformation })
-      .webkitConnection;
-
-  const effectiveType: NetworkEffectiveType =
-    (conn?.effectiveType as NetworkEffectiveType | undefined) ?? 'unknown';
-
+  const conn = getConnection();
+  const effectiveType = normaliseEffectiveType(conn?.effectiveType);
+  const isOnline = navigator.onLine;
+  const saveData = conn?.saveData ?? false;
   const isTurboMode =
+    !isOnline ||
     effectiveType === '2g' ||
     effectiveType === 'slow-2g' ||
     effectiveType === '3g' ||
-    (conn?.saveData ?? false) ||
-    (conn?.downlink !== undefined && conn.downlink < 1.0); // < 1 Mbps
+    saveData ||
+    (conn?.downlink !== undefined && conn.downlink < 1.0);
 
   return {
     effectiveType,
     downlinkMbps: conn?.downlink,
     rttMs: conn?.rtt,
-    saveData: conn?.saveData ?? false,
+    saveData,
     isTurboMode,
-    isOnline: navigator.onLine,
+    isOnline,
   };
 }
 
@@ -83,45 +101,45 @@ function readNetworkState(): NetworkQualityState {
 // ---------------------------------------------------------------------------
 
 /**
- * useNetworkQuality
- *
- * Reactively tracks the browser's reported network quality via the
- * Network Information API. Updates whenever the connection changes.
- *
- * Turbo Mode is activated when:
- *  - effectiveType is 2g / slow-2g / 3g
- *  - navigator.connection.saveData is true
- *  - Estimated downlink < 1 Mbps
+ * Reactively tracks browser network quality and the online/offline state.
+ * Turbo Mode is a derived signal: callers can combine it with the user's
+ * persisted preference without mutating that preference when the connection
+ * changes.
  */
 export function useNetworkQuality(): NetworkQualityState {
   const [state, setState] = useState<NetworkQualityState>(readNetworkState);
   const frameRef = useRef<number | null>(null);
 
   const refresh = useCallback(() => {
-    // Debounce via rAF to coalesce rapid change events.
-    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-    frameRef.current = requestAnimationFrame(() => {
+    if (typeof window === 'undefined') return;
+
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+      window.clearTimeout(frameRef.current);
+    }
+
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
       setState(readNetworkState());
     });
   }, []);
 
   useEffect(() => {
-    const conn = (
-      navigator as Navigator & { connection?: NetworkInformation }
-    ).connection;
+    const connection = getConnection();
 
-    conn?.addEventListener('change', refresh);
+    connection?.addEventListener('change', refresh);
     window.addEventListener('online', refresh);
     window.addEventListener('offline', refresh);
-
-    // Immediate read in case SSR initial state differed.
     refresh();
 
     return () => {
-      conn?.removeEventListener('change', refresh);
+      connection?.removeEventListener('change', refresh);
       window.removeEventListener('online', refresh);
       window.removeEventListener('offline', refresh);
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        window.clearTimeout(frameRef.current);
+      }
     };
   }, [refresh]);
 

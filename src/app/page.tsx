@@ -3,6 +3,7 @@
 import React, { useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { useCatalog } from '@/hooks/useCatalog';
+import { useNetworkQuality } from '@/hooks/useNetworkQuality';
 import { useFeedStore } from '@/lib/store/feedStore';
 import TabBar from '@/components/Navigation/TabBar';
 
@@ -56,7 +57,8 @@ const CatalogStatusBanner: React.FC<{
 };
 
 export default function Home() {
-  const { reel } = useFeedStore();
+  const { reel, isTurboMode: userTurboMode } = useFeedStore();
+  const network = useNetworkQuality();
   const { isLoading, error, catalogMeta, loadNextPage } = useCatalog();
 
   const handleReachEnd = useCallback(async () => {
@@ -88,14 +90,21 @@ export default function Home() {
   }
 
   return (
-    <main style={{ backgroundColor: '#000', minHeight: '100vh' }}>
+    <main
+      className="fullscreen-feed-snap"
+      style={{ backgroundColor: '#000', minHeight: '100vh' }}
+    >
       <CatalogStatusBanner
         source={catalogMeta?.source || null}
         error={error}
       />
 
       {reel.length > 0 && (
-        <SwiperFeed cinemaReel={reel} onReachEnd={handleReachEnd} />
+        <SwiperFeed
+          cinemaReel={reel}
+          onReachEnd={handleReachEnd}
+          turboMode={userTurboMode || network.isTurboMode}
+        />
       )}
 
       {reel.length === 0 && !isLoading && (
